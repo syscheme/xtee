@@ -111,7 +111,7 @@ FDSet out2fds;
   }
 
 char buf[1024] = {0};
-size_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd)
+ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd)
 {
   ssize_t n = 0;
 
@@ -361,7 +361,7 @@ int main(int argc, char *argv[])
       procfd(CHILDOUT(child), fdread, fderr, child.out2fds, STDOUT_FILENO);
 
       // about the child's stderr
-      procfd(CHILDERR(child), fdread, fderr, child.out2fds, STDERR_FILENO);
+      procfd(CHILDERR(child), fdread, fderr, child.err2fds, STDERR_FILENO);
     }
 
   } // end of select() loop
