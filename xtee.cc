@@ -21,7 +21,7 @@ bool gQuit = false;
 void usage()
 {
   std::cout << "Usage: xtee {-n|[-a] <file>} [-s <bps>] [-k <bytes>] [-t <secs>] [-d <secs>] [-q <secs>]" EOL
-            << "       xtee [-c <cmdline>] [-l <TARGET>:<SOURCE>]" EOL
+            << "            [-c <cmdline>] [-l <TARGET>:<SOURCE>]" EOL EOL
             << "Options:" EOL
             << "  -v <level>           verbose level, default 4 to output progress onto stderr" EOL
             << "  -a                   append to the output file" EOL
@@ -35,7 +35,7 @@ void usage()
             << "  -l <TARGET>:<SOURCE> links the source fd to the target fd, <TARGET> or <SOURCE> is in format of" EOL
             << "                       \"[<cmdNo>.]<fd>\", where <cmdNo> is the sequence number of -c options, and" EOL
             << "                       default '0.' refers to the xtee command itself" EOL
-            << "  -h                   display this screen" EOL
+            << "  -h                   display this screen" EOL EOL
             << "Examples:" EOL
             << "  a) the following command results the same as runing \"ls -l | sort and ls -l | grep txt\"，but the" EOL
             << "     outputs of the single round of \"ls -l\" will be taken by both \"sort\" and \"grep\" commands:" EOL
@@ -238,22 +238,19 @@ int main(int argc, char *argv[])
     }
 
     // this is the parent process, close the pipe[0]s and only leave pipe[1]s open
-    ::close(PSTDIN(stdioPipes)[0]);  // file descriptor unused in parent
-    ::close(PSTDOUT(stdioPipes)[0]); // file descriptor unused in parent
-    ::close(PSTDERR(stdioPipes)[0]); // file descriptor unused in parent
-
     ChildStub child;
-    child.cmd = childcmd,
-    child.stdio[0] = PSTDIN(stdioPipes)[1];
-    child.stdio[1] = PSTDOUT(stdioPipes)[1];
-    child.stdio[2] = PSTDERR(stdioPipes)[1];
+    child.cmd = childcmd;
+    for (int j = 0; j < 3; j++)
+    {
+      ::close(stdioPipes[j][0]); // file descriptor unused in parent
+      child.stdio[j] = stdioPipes[j][1];
+      ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
+    }
+
     child.pid = pidChild;
     child.ret = 0;
     child.out2fds = FDSet();
     child.err2fds = FDSet();
-
-    for (int j = 0; j < 3; j++)
-      ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
     children.push_back(child);
   }
