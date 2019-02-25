@@ -1,14 +1,22 @@
+extern "C"
+{
 #include <unistd.h>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+}
 
 #include <iostream>
 #include <string>
 #include <vector>
+#include <set>
 
 #define EOL "\r\n"
+#define CHECK_INTERVAL (200) //  200msec
+
+bool gQuit = false;
 
 void usage()
 {
@@ -37,55 +45,63 @@ void usage()
             << EOL;
 }
 
-
 void logerr(const char fmt, ...)
 {
-
 }
 
 #define trace
 
-typedef struct {
+typedef struct
+{
   bool noOutFile;
   bool append;
   long bitrate;
   long bytesToSkip;
-  int  secsToSkip;
-  int  secsDuration;
-  int  secsTimeout;
+  int secsToSkip;
+  int secsDuration;
+  int secsTimeout;
   unsigned int logflags;
 } CmdOptions;
 
 CmdOptions cmdOpts = {
-  .noOutFile = false,
-  .append = false,
-  .bitrate = -1,
-  .bytesToSkip =-1,
-  .secsToSkip =-1,
-  .secsDuration =-1,
-  .secsTimeout =-1,
-  .logflags =0
-};
+    .noOutFile = false,
+    .append = false,
+    .bitrate = -1,
+    .bytesToSkip = -1,
+    .secsToSkip = -1,
+    .secsDuration = -1,
+    .secsTimeout = -1,
+    .logflags = 0};
 
 typedef int Pipe[2];
 typedef Pipe StdioPipes[3];
 
-#define PSTDIN(_PIO)  (_PIO[0])
+#define PSTDIN(_PIO) (_PIO[0])
 #define PSTDOUT(_PIO) (_PIO[1])
 #define PSTDERR(_PIO) (_PIO[2])
 
-typedef std::vector < std::string > Strings;
+typedef std::vector<char *> Strings;
 Strings childCommands, fdLinks;
+typedef std::set<int> FDSet;
 
 typedef struct _ChildStub
 {
+  char *cmd;
   int stdio[3];
+  FDSet out2fds, err2fds;
   int pid;
   int ret;
 } ChildStub;
 
-typedef std::vector < ChildStub > Children;
+typedef std::vector<ChildStub> Children;
 Children children;
+FDSet out2fds;
+
+#define CHILDIN(_CH) PSTDIN(_CH.stdio)
+#define CHILDOUT(_CH) PSTDOUT(_CH.stdio)
+#define CHILDERR(_CH) PSTDERR(_CH.stdio)
+
+#define IS_VALID_FLAG_SET(_FD, _SET) (_FD >= 0 && FD_ISSET(_FD, &_SET))
 
 int main(int argc, char *argv[])
 {
@@ -144,11 +160,9 @@ int main(int argc, char *argv[])
     }
   }
 
-  int maxfd =-1;
-
   for (size_t i = 0; i < childCommands.size(); i++)
   {
-    char* childcmd = (char*) childCommands[i].c_str();
+    char *childcmd = childCommands[i]; // (char*) childCommands[i].c_str();
 
     StdioPipes stdioPipes;
     ::pipe(PSTDIN(stdioPipes));
@@ -163,23 +177,23 @@ int main(int argc, char *argv[])
       ::close(PSTDIN(stdioPipes)[0]), ::close(PSTDIN(stdioPipes)[1]);
       ::dup2(PSTDOUT(stdioPipes)[0], STDOUT_FILENO);
       ::close(PSTDOUT(stdioPipes)[0]), ::close(PSTDOUT(stdioPipes)[1]);
-      ::dup2(PSTDERR(stdioPipes)[0], STDOUT_FILENO);
+      ::dup2(PSTDERR(stdioPipes)[0], STDERR_FILENO);
       ::close(PSTDERR(stdioPipes)[0]), ::close(PSTDERR(stdioPipes)[1]);
 
-      printf("%s wrapping child-%u[%s]...\n", argv[0], i, childcmd);
+      printf("%s wrapping child-%ul[%s]...\n", argv[0], i, childcmd);
 
       int childargc = 0;
       char *childargv[32];
-      for (char *p2 = strtok(childcmd, " "); p2 && childargc < (sizeof(childargv) / sizeof(childargv[0])) - 1; childargc++)
+      for (char *p2 = strtok(childcmd, " "); p2 && childargc < (int)(sizeof(childargv) / sizeof(childargv[0])) - 1; childargc++)
       {
         childargv[childargc] = p2;
         p2 = strtok(0, " ");
       }
 
       childargv[childargc++] = NULL;
-      
+
       int ret = execvp(childargv[0], childargv);
-      printf("%s child-%u[%s] finished, ret(%d)\n", argv[0], i, childcmd, ret);
+      printf("%s child-%ul[%s] exits(%d)\n", argv[0], i, childcmd, ret);
       return ret; // end of the child process
     }
 
@@ -188,56 +202,200 @@ int main(int argc, char *argv[])
     ::close(PSTDOUT(stdioPipes)[0]); // file descriptor unused in parent
     ::close(PSTDERR(stdioPipes)[0]); // file descriptor unused in parent
 
-    ChildStub child = {
-      .stdio = {PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[1] },
-      .pid = pidChild,
-      .ret =0,
-    };
+    ChildStub child;
+    child.cmd = childcmd,
+    child.stdio[0] = PSTDIN(stdioPipes)[1];
+    child.stdio[1] = PSTDOUT(stdioPipes)[1];
+    child.stdio[2] = PSTDERR(stdioPipes)[1];
+    child.pid = pidChild;
+    child.ret = 0;
+    child.out2fds = FDSet();
+    child.err2fds = FDSet();
 
-    if (maxfd < PSTDIN(child.stdio))
-      maxfd = PSTDIN(child.stdio);
-    if (maxfd < PSTDOUT(child.stdio))
-      maxfd = PSTDOUT(child.stdio);
-    if (maxfd < PSTDERR(child.stdio))
-      maxfd = PSTDERR(child.stdio);
+    for (int j = 0; j < 3; j++)
+      ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
     children.push_back(child);
   }
 
-  printf("%s started %d child(s), making up the links\n", argv[0], children.size());
-  for (size_t i =0; i < fdLinks.size(); i++)
+  printf("%s started %ul child(s), making up the links\n", argv[0], children.size());
+  for (size_t i = 0; i < fdLinks.size(); i++)
   {
-    const char* delimitor = strchr(fdLinks[i].c_str(), ':');
+    const char *delimitor = strchr(fdLinks[i], ':'); // strchr(fdLinks[i].c_str(), ':');
     if (NULL == delimitor)
       continue;
     // TODO
   }
 
-  while (true)
+  // scan and audit the linkages
+  for (size_t i = 0; i < children.size(); i++)
   {
-  //   FD_SET fdread, fdwrite, fderr;
-  //   FD_ZERO(&fdread), FD_ZERO(&fdwrite), FD_ZERO(&fderr);
-  //   for (size_t i =0; i < children.size(); i++)
-  //   {
-  //     if (PSTDIN(children[i].stdio) >0)
-  //         FD_SET(&fdwrite, PSTDIN(children[i].stdio));
+    ChildStub &child = children[i];
+    if (child.out2fds.size() == 1)
+    {
+      // directly connect the link
+      int dest = (*child.out2fds.begin());
+      if (dest > STDERR_FILENO)
+      {
+        ::dup2(CHILDOUT(child), dest);
+        ::close(CHILDOUT(child));
+        CHILDOUT(child) = -1;
+      }
+    }
 
-  //     if (PSTDOUT(children[i].stdio) >0)
-  //         FD_SET(&fdread, PSTDOUT(children[i].stdio));
-
-  //     if (PSTDERR(children[i].stdio) >0)
-  //     {
-  //         FD_SET(&fdread, PSTDERR(children[i].stdio))
-  //         FD_SET(&fderr, PSTDERR(children[i].stdio))
-  //     }
-  //   }
-
-    // rc = ::select(fdread, fdwrite, fderr, maxfd);
-
-
+    if (child.err2fds.size() == 1)
+    {
+      // directly connect the link
+      int dest = (*child.err2fds.begin());
+      if (dest > STDERR_FILENO)
+      {
+        ::dup2(CHILDERR(child), dest);
+        ::close(CHILDERR(child));
+        CHILDERR(child) = -1;
+      }
+    }
   }
 
-    // int status;
-    // pid_t wpid = waitpid(pid, &status, 0); // wait for child to finish before exiting
-    // return wpid == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+  int maxTimeouts = cmdOpts.secsTimeout * 1000 / CHECK_INTERVAL;
+
+  for (int timeouts = 0; !gQuit && (maxTimeouts < 0 || timeouts < maxTimeouts);)
+  {
+    fd_set fdread, fderr;
+    FD_ZERO(&fdread);
+    FD_ZERO(&fderr);
+
+#define SET_VALID_FD_IN(_FD, _FDSET, _MAXFD) \
+  if (_FD >= 0)                              \
+  {                                          \
+    FD_SET(_FD, &_FDSET);                    \
+    if (_MAXFD < _FD)                        \
+      _MAXFD = _FD;                          \
+  }
+
+    int maxfd = -1;
+    SET_VALID_FD_IN(STDIN_FILENO, fdread, maxfd); // the STDIN of the parent process
+
+    for (size_t i = 0; i < children.size(); i++)
+    {
+      ChildStub &child = children[i];
+      int fd = CHILDOUT(child);
+      SET_VALID_FD_IN(fd, fdread, maxfd);
+      SET_VALID_FD_IN(fd, fderr, maxfd);
+
+      fd = CHILDERR(child);
+      SET_VALID_FD_IN(fd, fdread, maxfd);
+      SET_VALID_FD_IN(fd, fderr, maxfd);
+    }
+
+    if (maxfd <= STDERR_FILENO)
+    {
+      // no child seems alive, quit
+      gQuit = true;
+      break;
+    }
+
+    struct timeval timeout;
+    timeout.tv_sec = CHECK_INTERVAL / 1000;
+    timeout.tv_usec = (CHECK_INTERVAL % 1000) * 1000;
+
+    int rc = select(maxfd + 1, &fdread, NULL, &fderr, &timeout);
+    //			printf("After select [%d %d %d] %s\n", fdread.fd_count, fdwrite.fd_count, fderr.fd_count, TimeUtil::TimeToUTC(now(), buf, sizeof(buf)-2, true));
+    if (gQuit)
+      break;
+
+    if (rc < 0) // select(), quit
+    {
+
+      break;
+    }
+    else if (0 == rc) // timeout
+    {
+      timeouts++;
+      continue;
+    }
+
+    char buf[1024] = {0};
+    ssize_t n = 0;
+
+    // about this stdin
+    if (IS_VALID_FLAG_SET(STDIN_FILENO, fdread) && (n = ::read(STDIN_FILENO, buf, sizeof(buf))) > 0)
+    {
+      // TODO: bitrate control
+      
+      if (out2fds.empty())
+        ::write(STDOUT_FILENO, buf, n);
+      else
+        for (FDSet::iterator it = out2fds.begin(); it != out2fds.end(); it++)
+        {
+          if (*it > 0)
+            ::write(*it, buf, n);
+        }
+    }
+
+    for (size_t i = 0; !gQuit && i < children.size(); i++)
+    {
+      ChildStub &child = children[i];
+
+      // about the child's stdout
+      {
+        int &fd = PSTDOUT(child.stdio);
+        if (IS_VALID_FLAG_SET(fd, fdread) && (n = ::read(fd, buf, sizeof(buf))) > 0)
+        {
+          if (child.out2fds.empty())
+            ::write(STDOUT_FILENO, buf, n);
+          else
+            for (FDSet::iterator it = child.out2fds.begin(); it != child.out2fds.end(); it++)
+            {
+              if (*it > 0)
+                ::write(*it, buf, n);
+            }
+        }
+
+        if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
+        {
+          ::close(fd);
+          fd = -1;
+        }
+      }
+
+      // about the child's stderr
+      {
+        int &fd = PSTDERR(child.stdio);
+        if (IS_VALID_FLAG_SET(fd, fdread) && (n = ::read(fd, buf, sizeof(buf))) > 0)
+        {
+          if (child.out2fds.empty())
+            ::write(STDERR_FILENO, buf, n);
+          else
+            for (FDSet::iterator it = child.err2fds.begin(); it != child.err2fds.end(); it++)
+            {
+              if (*it > 0)
+                ::write(*it, buf, n);
+            }
+        }
+
+        if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
+        {
+          ::close(fd);
+          fd = -1;
+        }
+      }
+    }
+
+  } // end of select() loop
+
+  for (size_t i = 0; i < children.size(); i++)
+  {
+    for (int j = 0; j < 3; j++)
+    {
+      int &fd = children[i].stdio[j];
+      if (fd > STDERR_FILENO)
+        ::close(fd);
+      fd = -1;
+    }
+  }
+  // int status;
+  // pid_t wpid = waitpid(pid, &status, 0); // wait for child to finish before exiting
+  // return wpid == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+  return 0;
 }
