@@ -102,9 +102,45 @@ FDSet out2fds;
 #define CHILDERR(_CH) PSTDERR(_CH.stdio)
 
 #define IS_VALID_FLAG_SET(_FD, _SET) (_FD >= 0 && FD_ISSET(_FD, &_SET))
+#define SET_VALID_FD_IN(_FD, _FDSET, _MAXFD) \
+  if (_FD >= 0)                              \
+  {                                          \
+    FD_SET(_FD, &_FDSET);                    \
+    if (_MAXFD < _FD)                        \
+      _MAXFD = _FD;                          \
+  }
+
+char buf[1024] = {0};
+size_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd)
+{
+  ssize_t n = 0;
+
+  if (IS_VALID_FLAG_SET(fd, fdread) && (n = ::read(fd, buf, sizeof(buf))) > 0)
+  {
+    if (fwdset.empty())
+      ::write(defaultfd, buf, n);
+    else
+    {
+      for (FDSet::const_iterator it = fwdset.begin(); it != fwdset.end(); it++)
+      {
+        if (*it > 0)
+          ::write(*it, buf, n);
+      }
+    }
+  }
+
+  if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
+  {
+    ::close(fd);
+    fd = -1;
+  }
+
+  return n;
+}
 
 int main(int argc, char *argv[])
 {
+  int ret=0;
   if (argc < 2)
   {
     usage();
@@ -152,11 +188,12 @@ int main(int argc, char *argv[])
       fdLinks.push_back(optarg);
       break;
 
+    default:
+      ret = -1;
     case 'h':
     case '?':
-    default:
       usage();
-      return 0;
+      return ret;
     }
   }
 
@@ -180,7 +217,7 @@ int main(int argc, char *argv[])
       ::dup2(PSTDERR(stdioPipes)[0], STDERR_FILENO);
       ::close(PSTDERR(stdioPipes)[0]), ::close(PSTDERR(stdioPipes)[1]);
 
-      printf("%s wrapping child-%ul[%s]...\n", argv[0], i, childcmd);
+      printf("%s wrapping child-%u[%s]...\n", argv[0], i, childcmd);
 
       int childargc = 0;
       char *childargv[32];
@@ -193,7 +230,7 @@ int main(int argc, char *argv[])
       childargv[childargc++] = NULL;
 
       int ret = execvp(childargv[0], childargv);
-      printf("%s child-%ul[%s] exits(%d)\n", argv[0], i, childcmd, ret);
+      printf("%s child-%u[%s] exits(%d)\n", argv[0], i, childcmd, ret);
       return ret; // end of the child process
     }
 
@@ -218,7 +255,7 @@ int main(int argc, char *argv[])
     children.push_back(child);
   }
 
-  printf("%s started %ul child(s), making up the links\n", argv[0], children.size());
+  printf("%s started %u child(s), making up the links\n", argv[0], children.size());
   for (size_t i = 0; i < fdLinks.size(); i++)
   {
     const char *delimitor = strchr(fdLinks[i], ':'); // strchr(fdLinks[i].c_str(), ':');
@@ -243,7 +280,7 @@ int main(int argc, char *argv[])
       }
     }
 
-    if (child.err2fds.size() == 1)
+    if (child.err2fds.size() == 1) 
     {
       // directly connect the link
       int dest = (*child.err2fds.begin());
@@ -263,14 +300,6 @@ int main(int argc, char *argv[])
     fd_set fdread, fderr;
     FD_ZERO(&fdread);
     FD_ZERO(&fderr);
-
-#define SET_VALID_FD_IN(_FD, _FDSET, _MAXFD) \
-  if (_FD >= 0)                              \
-  {                                          \
-    FD_SET(_FD, &_FDSET);                    \
-    if (_MAXFD < _FD)                        \
-      _MAXFD = _FD;                          \
-  }
 
     int maxfd = -1;
     SET_VALID_FD_IN(STDIN_FILENO, fdread, maxfd); // the STDIN of the parent process
@@ -318,18 +347,10 @@ int main(int argc, char *argv[])
     ssize_t n = 0;
 
     // about this stdin
-    if (IS_VALID_FLAG_SET(STDIN_FILENO, fdread) && (n = ::read(STDIN_FILENO, buf, sizeof(buf))) > 0)
     {
+      int fdStdin = STDIN_FILENO;
+      ssize_t n = procfd(fdStdin, fdread, fderr, out2fds, STDOUT_FILENO);
       // TODO: bitrate control
-      
-      if (out2fds.empty())
-        ::write(STDOUT_FILENO, buf, n);
-      else
-        for (FDSet::iterator it = out2fds.begin(); it != out2fds.end(); it++)
-        {
-          if (*it > 0)
-            ::write(*it, buf, n);
-        }
     }
 
     for (size_t i = 0; !gQuit && i < children.size(); i++)
@@ -337,52 +358,15 @@ int main(int argc, char *argv[])
       ChildStub &child = children[i];
 
       // about the child's stdout
-      {
-        int &fd = PSTDOUT(child.stdio);
-        if (IS_VALID_FLAG_SET(fd, fdread) && (n = ::read(fd, buf, sizeof(buf))) > 0)
-        {
-          if (child.out2fds.empty())
-            ::write(STDOUT_FILENO, buf, n);
-          else
-            for (FDSet::iterator it = child.out2fds.begin(); it != child.out2fds.end(); it++)
-            {
-              if (*it > 0)
-                ::write(*it, buf, n);
-            }
-        }
-
-        if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
-        {
-          ::close(fd);
-          fd = -1;
-        }
-      }
+      procfd(CHILDOUT(child), fdread, fderr, child.out2fds, STDOUT_FILENO);
 
       // about the child's stderr
-      {
-        int &fd = PSTDERR(child.stdio);
-        if (IS_VALID_FLAG_SET(fd, fdread) && (n = ::read(fd, buf, sizeof(buf))) > 0)
-        {
-          if (child.out2fds.empty())
-            ::write(STDERR_FILENO, buf, n);
-          else
-            for (FDSet::iterator it = child.err2fds.begin(); it != child.err2fds.end(); it++)
-            {
-              if (*it > 0)
-                ::write(*it, buf, n);
-            }
-        }
-
-        if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
-        {
-          ::close(fd);
-          fd = -1;
-        }
-      }
+      procfd(CHILDERR(child), fdread, fderr, child.out2fds, STDERR_FILENO);
     }
 
   } // end of select() loop
 
+  // close all pipes that are still openning
   for (size_t i = 0; i < children.size(); i++)
   {
     for (int j = 0; j < 3; j++)
@@ -393,6 +377,7 @@ int main(int argc, char *argv[])
       fd = -1;
     }
   }
+
   // int status;
   // pid_t wpid = waitpid(pid, &status, 0); // wait for child to finish before exiting
   // return wpid == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
