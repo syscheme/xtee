@@ -172,7 +172,7 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
       }
 
       ::write(defaultfd, buf, n);
-      
+
       if (defaultfd == STDERR_FILENO && childIdx > 0)
         ::write(defaultfd, EOL, sizeof(EOL)-1);
     }
@@ -188,6 +188,7 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
 
   if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
   {
+    log(LOGF_TRACE, "C%02u[%s] closing error fd(%d)", childIdx, fd);
     ::close(fd);
     fd = -1;
     n = -1;
@@ -285,6 +286,7 @@ int main(int argc, char *argv[])
     char *childcmd = childCommands[i]; // (char*) childCommands[i].c_str();
 
     StdioPipes stdioPipes;
+    memset(&stdioPipes, -1, sizeof(stdioPipes));
     ::pipe(PSTDIN(stdioPipes));
     ::pipe(PSTDOUT(stdioPipes));
     ::pipe(PSTDERR(stdioPipes));
@@ -292,7 +294,8 @@ int main(int argc, char *argv[])
     pid_t pidChild = fork(); // create child process that is a clone of the parent
     if (pidChild == 0)
     {
-      log(LOGF_TRACE, "C%02u[%s] starts", i+1, childcmd);
+      log(LOGF_TRACE, "C%02u[%s] spawned: %d<%d, %d>%d, %d>%d", i+1, childcmd,
+        PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
 
       // this the child process, remap the pipe to local stdXX
       ::dup2(PSTDIN(stdioPipes)[0], STDIN_FILENO);
@@ -312,6 +315,8 @@ int main(int argc, char *argv[])
 
       childargv[childargc++] = NULL;
 
+      log(LOGF_TRACE, "C%02u[%s] starts", i+1, childcmd);
+
       int ret = execvp(childargv[0], childargv);
       log(LOGF_TRACE, "C%02u[%s] exits(%d)", i+1, childcmd, ret);
       return ret; // end of the child process
@@ -330,6 +335,21 @@ int main(int argc, char *argv[])
     child.pid = pidChild;
     child.status = 0;
 
+    // how to ensure the child has been started??
+    // wait till the child starts
+    // pid_t wpid =0;
+    // for (int j =0; j < 100; j++)
+    // {
+    //   wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
+    //   if (wpid != 0 || WIFEXITED(child.status))
+    //     break;
+
+    //   ::usleep(1000);
+    // }
+
+    // if (wpid != child.pid)
+    //   continue;
+
     // file descriptor unused in parent
     child.stdio[0] = child.stdio[1] = child.stdio[2] = -1;
     ::close(PSTDIN(stdioPipes)[0]);
@@ -342,7 +362,8 @@ int main(int argc, char *argv[])
 //      ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
     children.push_back(child);
-    log(LOGF_TRACE, "C%02u[%s] created: pid(%d)", i, childcmd, pidChild);
+    log(LOGF_TRACE, "C%02u[%s] created: pid(%d) %d>%d, %d<%d, %d<%d", child.idx, child.cmd, child.pid, 
+      PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
   }
 
   log(LOGF_TRACE, "created %u child(s), making up the links", children.size());
@@ -401,8 +422,11 @@ int main(int argc, char *argv[])
         {
           ChildStub &child = children[j];
           pid_t wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
-          if (wpid != child.pid || WIFEXITED(child.status))                    // return wpid == child.pid && WIFEXITED(child.status) ? WEXITSTATUS(child.status) : -1;
+          if (wpid != 0) // || WIFEXITED(child.status))                    // return wpid == child.pid && WIFEXITED(child.status) ? WEXITSTATUS(child.status) : -1;
+          {
+            log(LOGF_TRACE, "C%02u[%s] seems gone: %d->pid(%d) status(0x%x)", child.idx, child.cmd, wpid, child.pid, child.status);
             closePipesToChild(child);
+          }
         }
       // }
     }
@@ -491,6 +515,7 @@ int main(int argc, char *argv[])
   } // end of select() loop
 
   // close all pipes that are still openning
+  log(LOGF_TRACE, "end of loop, closing %u child(s)", children.size());
   for (size_t i = 0; i < children.size(); i++)
     closePipesToChild(children[i]);
 
