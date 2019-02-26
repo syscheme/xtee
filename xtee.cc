@@ -93,7 +93,7 @@ typedef struct _ChildStub
   int stdio[3];
   FDSet out2fds, err2fds;
   int pid;
-  int ret;
+  int status;
 } ChildStub;
 
 typedef std::vector<ChildStub> Children;
@@ -136,9 +136,21 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
   {
     ::close(fd);
     fd = -1;
+    n =-1;
   }
 
   return n;
+}
+
+void closePipesToChild(ChildStub& child)
+{
+    for (int j = 0; j < 3; j++)
+    {
+      int &fd = child.stdio[j];
+      if (fd > STDERR_FILENO)
+        ::close(fd);
+      fd = -1;
+    }
 }
 
 int main(int argc, char *argv[])
@@ -212,15 +224,15 @@ int main(int argc, char *argv[])
     pid_t pidChild = fork(); // create child process that is a clone of the parent
     if (pidChild == 0)
     {
+      printf("%s wrapping child-%u[%s]...\n", argv[0], i, childcmd);
+
       // this the child process, remap the pipe to local stdXX
       ::dup2(PSTDIN(stdioPipes)[0], STDIN_FILENO);
       ::close(PSTDIN(stdioPipes)[0]), ::close(PSTDIN(stdioPipes)[1]);
-      ::dup2(PSTDOUT(stdioPipes)[0], STDOUT_FILENO);
+      ::dup2(PSTDOUT(stdioPipes)[1], STDOUT_FILENO);
       ::close(PSTDOUT(stdioPipes)[0]), ::close(PSTDOUT(stdioPipes)[1]);
       ::dup2(PSTDERR(stdioPipes)[0], STDERR_FILENO);
       ::close(PSTDERR(stdioPipes)[0]), ::close(PSTDERR(stdioPipes)[1]);
-
-      printf("%s wrapping child-%u[%s]...\n", argv[0], i, childcmd);
 
       int childargc = 0;
       char *childargv[32];
@@ -233,6 +245,10 @@ int main(int argc, char *argv[])
       childargv[childargc++] = NULL;
 
       int ret = execvp(childargv[0], childargv);
+
+      // for (int j=0; j < 10000; j++)
+      //   printf("%s child-%u[%s]: %d\n", argv[0], i, childcmd, j);
+
       printf("%s child-%u[%s] exits(%d)\n", argv[0], i, childcmd, ret);
       return ret; // end of the child process
     }
@@ -240,17 +256,20 @@ int main(int argc, char *argv[])
     // this is the parent process, close the pipe[0]s and only leave pipe[1]s open
     ChildStub child;
     child.cmd = childcmd;
-    for (int j = 0; j < 3; j++)
-    {
-      ::close(stdioPipes[j][0]); // file descriptor unused in parent
-      child.stdio[j] = stdioPipes[j][1];
-      ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
-    }
+
+    // file descriptor unused in parent
+    child.stdio[0] = child.stdio[1] = child.stdio[2] =-1;
+    ::close(PSTDIN(stdioPipes)[0]);  child.stdio[0] = PSTDIN(stdioPipes)[1]; 
+    ::close(PSTDOUT(stdioPipes)[1]); child.stdio[1] = PSTDOUT(stdioPipes)[0];
+    ::close(PSTDERR(stdioPipes)[1]); child.stdio[2] = PSTDERR(stdioPipes)[0];
+    // for (int j = 0; j < 3; j++)
+    // {
+    //   child.stdio[j] = stdioPipes[j][1];
+    //   // ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
+    // }
 
     child.pid = pidChild;
-    child.ret = 0;
-    child.out2fds = FDSet();
-    child.err2fds = FDSet();
+    child.status = 0;
 
     children.push_back(child);
   }
@@ -340,11 +359,9 @@ int main(int argc, char *argv[])
     else if (0 == rc) // timeout
     {
       timeouts++;
+
       continue;
     }
-
-    char buf[1024] = {0};
-    ssize_t n = 0;
 
     // about this stdin
     {
@@ -364,6 +381,14 @@ int main(int argc, char *argv[])
       procfd(CHILDERR(child), fdread, fderr, child.err2fds, STDERR_FILENO);
     }
 
+//    for (size_t j = 0; !gQuit && j < children.size(); j++)
+//    {
+//      ChildStub &child = children[j];
+//      pid_t wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
+//      if (wpid != child.pid || WIFEXITED(child.status))                    // return wpid == child.pid && WIFEXITED(child.status) ? WEXITSTATUS(child.status) : -1;
+//        closePipesToChild(child);
+//    }
+
   } // end of select() loop
 
   // close all pipes that are still openning
@@ -377,10 +402,6 @@ int main(int argc, char *argv[])
       fd = -1;
     }
   }
-
-  // int status;
-  // pid_t wpid = waitpid(pid, &status, 0); // wait for child to finish before exiting
-  // return wpid == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
   return 0;
 }
