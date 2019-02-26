@@ -172,6 +172,9 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
       }
 
       ::write(defaultfd, buf, n);
+      
+      if (defaultfd == STDERR_FILENO && childIdx > 0)
+        ::write(defaultfd, EOL, sizeof(EOL)-1);
     }
     else
     {
