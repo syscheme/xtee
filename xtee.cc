@@ -6,6 +6,9 @@ extern "C"
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <stdarg.h>
+#include <errno.h>
+#include <sys/time.h>
 }
 
 #include <iostream>
@@ -18,6 +21,9 @@ extern "C"
 
 bool gQuit = false;
 
+// -----------------------------
+// usage()
+// -----------------------------
 void usage()
 {
   std::cout << "Usage: xtee {-n|[-a] <file>} [-s <bps>] [-k <bytes>] [-t <secs>] [-d <secs>] [-q <secs>]" EOL
@@ -48,11 +54,8 @@ void usage()
             << EOL;
 }
 
-void logerr(const char fmt, ...)
-{
-}
-
-#define trace
+#define LOGF_TRACE (1 << 0)
+#define LOGF_ERROR (1 << 1)
 
 typedef struct
 {
@@ -74,7 +77,7 @@ CmdOptions cmdOpts = {
     .secsToSkip = -1,
     .secsDuration = -1,
     .secsTimeout = -1,
-    .logflags = 0};
+    .logflags = 0xff};
 
 typedef int Pipe[2];
 typedef Pipe StdioPipes[3];
@@ -89,6 +92,7 @@ typedef std::set<int> FDSet;
 
 typedef struct _ChildStub
 {
+  int idx;
   char *cmd;
   int stdio[3];
   FDSet out2fds, err2fds;
@@ -113,15 +117,62 @@ FDSet out2fds;
       _MAXFD = _FD;                          \
   }
 
+// -----------------------------
+// log()
+// -----------------------------
+#define LOG_LINE_MAX_BUF (256)
+int log(unsigned int category, const char *fmt, ...)
+{
+  if (0 == (cmdOpts.logflags & category))
+    return 0;
+
+  char msg[LOG_LINE_MAX_BUF];
+  va_list args;
+
+  va_start(args, fmt);
+  int nCount = ::vsnprintf(msg, LOG_LINE_MAX_BUF - 8, fmt, args);
+  va_end(args);
+  msg[LOG_LINE_MAX_BUF - 8] = '\0';
+
+  if (nCount < 0)
+    nCount = 0;
+
+  msg[nCount++] = '\r';
+  msg[nCount++] = '\n';
+  msg[nCount++] = '\0';
+  return ::write(STDERR_FILENO, msg, nCount);
+}
+
+long long now()
+{
+    struct timeval tmval;
+    if (0 != gettimeofday(&tmval,(struct timezone*)NULL))
+      return 0;
+    return (tmval.tv_sec*1000LL + tmval.tv_usec/1000);
+}
+
+
+// -----------------------------
+// procfd()
+// -----------------------------
 char buf[1024] = {0};
-ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd)
+ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd, int childIdx = -1)
 {
   ssize_t n = 0;
 
   if (IS_VALID_FLAG_SET(fd, fdread) && (n = ::read(fd, buf, sizeof(buf))) > 0)
   {
     if (fwdset.empty())
+    {
+      if (defaultfd == STDERR_FILENO && childIdx > 0)
+      {
+        char cIdent[20];
+        snprintf(cIdent, sizeof(cIdent) - 2, "C%02u> ", (unsigned)childIdx);
+        ::write(defaultfd, cIdent, strlen(cIdent));
+      }
+
       ::write(defaultfd, buf, n);
+    }
     else
     {
       for (FDSet::const_iterator it = fwdset.begin(); it != fwdset.end(); it++)
@@ -136,26 +187,40 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
   {
     ::close(fd);
     fd = -1;
-    n =-1;
+    n = -1;
   }
 
   return n;
 }
 
-void closePipesToChild(ChildStub& child)
+// -----------------------------
+// closePipesToChild()
+// -----------------------------
+void closePipesToChild(ChildStub &child)
 {
-    for (int j = 0; j < 3; j++)
+  int nClosed = 0;
+  for (int j = 0; j < 3; j++)
+  {
+    int &fd = child.stdio[j];
+    if (fd > STDERR_FILENO)
     {
-      int &fd = child.stdio[j];
-      if (fd > STDERR_FILENO)
-        ::close(fd);
+      ::fsync(fd);
+      ::close(fd);
       fd = -1;
+      nClosed++;
     }
+  }
+
+  if (nClosed > 0)
+    log(LOGF_TRACE, "%d link(s) closed to C%02d[%s]", nClosed, child.idx, child.cmd);
 }
 
+// -----------------------------
+// main()
+// -----------------------------
 int main(int argc, char *argv[])
 {
-  int ret=0;
+  int ret = 0;
   if (argc < 2)
   {
     usage();
@@ -224,14 +289,14 @@ int main(int argc, char *argv[])
     pid_t pidChild = fork(); // create child process that is a clone of the parent
     if (pidChild == 0)
     {
-      printf("%s wrapping child-%u[%s]...\n", argv[0], i, childcmd);
+      log(LOGF_TRACE, "C%02u[%s] starts", i+1, childcmd);
 
       // this the child process, remap the pipe to local stdXX
       ::dup2(PSTDIN(stdioPipes)[0], STDIN_FILENO);
       ::close(PSTDIN(stdioPipes)[0]), ::close(PSTDIN(stdioPipes)[1]);
       ::dup2(PSTDOUT(stdioPipes)[1], STDOUT_FILENO);
       ::close(PSTDOUT(stdioPipes)[0]), ::close(PSTDOUT(stdioPipes)[1]);
-      ::dup2(PSTDERR(stdioPipes)[0], STDERR_FILENO);
+      ::dup2(PSTDERR(stdioPipes)[1], STDERR_FILENO);
       ::close(PSTDERR(stdioPipes)[0]), ::close(PSTDERR(stdioPipes)[1]);
 
       int childargc = 0;
@@ -245,36 +310,39 @@ int main(int argc, char *argv[])
       childargv[childargc++] = NULL;
 
       int ret = execvp(childargv[0], childargv);
-
-      // for (int j=0; j < 10000; j++)
-      //   printf("%s child-%u[%s]: %d\n", argv[0], i, childcmd, j);
-
-      printf("%s child-%u[%s] exits(%d)\n", argv[0], i, childcmd, ret);
+      log(LOGF_TRACE, "C%02u[%s] exits(%d)", i+1, childcmd, ret);
       return ret; // end of the child process
+    }
+
+    if (pidChild <= 0)
+    {
+      log(LOGF_ERROR, "failed to create C%02u[%s]: pid(%d)", i, childcmd, pidChild);
+      return -100;
     }
 
     // this is the parent process, close the pipe[0]s and only leave pipe[1]s open
     ChildStub child;
+    child.idx = i + 1;
     child.cmd = childcmd;
-
-    // file descriptor unused in parent
-    child.stdio[0] = child.stdio[1] = child.stdio[2] =-1;
-    ::close(PSTDIN(stdioPipes)[0]);  child.stdio[0] = PSTDIN(stdioPipes)[1]; 
-    ::close(PSTDOUT(stdioPipes)[1]); child.stdio[1] = PSTDOUT(stdioPipes)[0];
-    ::close(PSTDERR(stdioPipes)[1]); child.stdio[2] = PSTDERR(stdioPipes)[0];
-    // for (int j = 0; j < 3; j++)
-    // {
-    //   child.stdio[j] = stdioPipes[j][1];
-    //   // ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
-    // }
-
     child.pid = pidChild;
     child.status = 0;
 
+    // file descriptor unused in parent
+    child.stdio[0] = child.stdio[1] = child.stdio[2] = -1;
+    ::close(PSTDIN(stdioPipes)[0]);
+    child.stdio[0] = PSTDIN(stdioPipes)[1];
+    ::close(PSTDOUT(stdioPipes)[1]);
+    child.stdio[1] = PSTDOUT(stdioPipes)[0];
+    ::close(PSTDERR(stdioPipes)[1]);
+    child.stdio[2] = PSTDERR(stdioPipes)[0];
+//    for (int j = 0; j < 3; j++)
+//      ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
+
     children.push_back(child);
+    log(LOGF_TRACE, "C%02u[%s] created: pid(%d)", i, childcmd, pidChild);
   }
 
-  printf("%s started %u child(s), making up the links\n", argv[0], children.size());
+  log(LOGF_TRACE, "created %u child(s), making up the links", children.size());
   for (size_t i = 0; i < fdLinks.size(); i++)
   {
     const char *delimitor = strchr(fdLinks[i], ':'); // strchr(fdLinks[i].c_str(), ':');
@@ -299,7 +367,7 @@ int main(int argc, char *argv[])
       }
     }
 
-    if (child.err2fds.size() == 1) 
+    if (child.err2fds.size() == 1)
     {
       // directly connect the link
       int dest = (*child.err2fds.begin());
@@ -313,9 +381,31 @@ int main(int argc, char *argv[])
   }
 
   int maxTimeouts = cmdOpts.secsTimeout * 1000 / CHECK_INTERVAL;
+  bool bChildCheckNeeded =false;
+  // long long stampLastCheck =0;
+  int nIdles =0;
 
   for (int timeouts = 0; !gQuit && (maxTimeouts < 0 || timeouts < maxTimeouts);)
   {
+    if (bChildCheckNeeded || nIdles > (10000/CHECK_INTERVAL))
+    {
+      // long long stampNow = now();
+      // if ((stampNow - stampLastCheck) > 10000) // at least 10sec
+      // {
+        // stampLastCheck = stampNow;
+        nIdles =0;
+        for (size_t j = 0; !gQuit && j < children.size(); j++)
+        {
+          ChildStub &child = children[j];
+          pid_t wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
+          if (wpid != child.pid || WIFEXITED(child.status))                    // return wpid == child.pid && WIFEXITED(child.status) ? WEXITSTATUS(child.status) : -1;
+            closePipesToChild(child);
+        }
+      // }
+    }
+
+    int bytesChildrenIO =0;
+
     fd_set fdread, fderr;
     FD_ZERO(&fdread);
     FD_ZERO(&fderr);
@@ -347,19 +437,18 @@ int main(int argc, char *argv[])
     timeout.tv_usec = (CHECK_INTERVAL % 1000) * 1000;
 
     int rc = select(maxfd + 1, &fdread, NULL, &fderr, &timeout);
-    //			printf("After select [%d %d %d] %s\n", fdread.fd_count, fdwrite.fd_count, fderr.fd_count, TimeUtil::TimeToUTC(now(), buf, sizeof(buf)-2, true));
     if (gQuit)
       break;
 
     if (rc < 0) // select(), quit
     {
-
+      log(LOGF_ERROR, "io wait got (%d) error(%d), quiting", rc, errno);
       break;
     }
     else if (0 == rc) // timeout
     {
       timeouts++;
-
+      bChildCheckNeeded = true;
       continue;
     }
 
@@ -367,41 +456,40 @@ int main(int argc, char *argv[])
     {
       int fdStdin = STDIN_FILENO;
       ssize_t n = procfd(fdStdin, fdread, fderr, out2fds, STDOUT_FILENO);
+
+      if (n >0)
+      {
       // TODO: bitrate control
+      }
     }
 
     for (size_t i = 0; !gQuit && i < children.size(); i++)
     {
       ChildStub &child = children[i];
+      ssize_t n =0;
 
       // about the child's stdout
-      procfd(CHILDOUT(child), fdread, fderr, child.out2fds, STDOUT_FILENO);
+      n = procfd(CHILDOUT(child), fdread, fderr, child.out2fds, STDOUT_FILENO, child.idx);
+      
+      if (n <0)
+        bChildCheckNeeded = true;
+      else bytesChildrenIO += n;
 
       // about the child's stderr
-      procfd(CHILDERR(child), fdread, fderr, child.err2fds, STDERR_FILENO);
+      n =procfd(CHILDERR(child), fdread, fderr, child.err2fds, STDERR_FILENO, child.idx);
+      if (n <0)
+        bChildCheckNeeded = true;
+      else bytesChildrenIO += n;
     }
 
-//    for (size_t j = 0; !gQuit && j < children.size(); j++)
-//    {
-//      ChildStub &child = children[j];
-//      pid_t wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
-//      if (wpid != child.pid || WIFEXITED(child.status))                    // return wpid == child.pid && WIFEXITED(child.status) ? WEXITSTATUS(child.status) : -1;
-//        closePipesToChild(child);
-//    }
+    if (bytesChildrenIO <=0)
+      nIdles++;
 
   } // end of select() loop
 
   // close all pipes that are still openning
   for (size_t i = 0; i < children.size(); i++)
-  {
-    for (int j = 0; j < 3; j++)
-    {
-      int &fd = children[i].stdio[j];
-      if (fd > STDERR_FILENO)
-        ::close(fd);
-      fd = -1;
-    }
-  }
+    closePipesToChild(children[i]);
 
   return 0;
 }
