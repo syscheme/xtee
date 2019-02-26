@@ -17,7 +17,7 @@ extern "C"
 #include <set>
 
 #define EOL "\r\n"
-#define CHECK_INTERVAL (200) //  200msec
+#define CHECK_INTERVAL (500) // 500msec
 
 bool gQuit = false;
 
@@ -143,14 +143,14 @@ int log(unsigned int category, const char *fmt, ...)
   return ::write(STDERR_FILENO, msg, nCount);
 }
 
-long long now()
+static long long now()
 {
-    struct timeval tmval;
-    if (0 != gettimeofday(&tmval,(struct timezone*)NULL))
-      return 0;
-    return (tmval.tv_sec*1000LL + tmval.tv_usec/1000);
-}
+  struct timeval tmval;
+  if (0 != gettimeofday(&tmval, (struct timezone *)NULL))
+    return 0;
 
+  return (tmval.tv_sec * 1000LL + tmval.tv_usec / 1000);
+}
 
 // -----------------------------
 // procfd()
@@ -167,14 +167,14 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
       if (defaultfd == STDERR_FILENO && childIdx > 0)
       {
         char cIdent[20];
-        snprintf(cIdent, sizeof(cIdent) - 2, "C%02u> ", (unsigned)childIdx);
+        snprintf(cIdent, sizeof(cIdent) - 2, "CH%02u> ", (unsigned)childIdx);
         ::write(defaultfd, cIdent, strlen(cIdent));
       }
 
       ::write(defaultfd, buf, n);
 
       if (defaultfd == STDERR_FILENO && childIdx > 0)
-        ::write(defaultfd, EOL, sizeof(EOL)-1);
+        ::write(defaultfd, EOL, sizeof(EOL) - 1);
     }
     else
     {
@@ -188,7 +188,7 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
 
   if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
   {
-    log(LOGF_TRACE, "C%02u[%s] closing error fd(%d)", childIdx, fd);
+    log(LOGF_TRACE, "CH%02u[%s] closing error fd(%d)", childIdx, fd);
     ::close(fd);
     fd = -1;
     n = -1;
@@ -200,7 +200,7 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
 // -----------------------------
 // closePipesToChild()
 // -----------------------------
-void closePipesToChild(ChildStub &child)
+int closePipesToChild(ChildStub &child)
 {
   int nClosed = 0;
   for (int j = 0; j < 3; j++)
@@ -216,7 +216,9 @@ void closePipesToChild(ChildStub &child)
   }
 
   if (nClosed > 0)
-    log(LOGF_TRACE, "%d link(s) closed to C%02d[%s]", nClosed, child.idx, child.cmd);
+    log(LOGF_TRACE, "closed %d link(s) to C%02d[%s]", nClosed, child.idx, child.cmd);
+
+  return nClosed;
 }
 
 // -----------------------------
@@ -283,21 +285,26 @@ int main(int argc, char *argv[])
 
   for (size_t i = 0; i < childCommands.size(); i++)
   {
-    char *childcmd = childCommands[i]; // (char*) childCommands[i].c_str();
+    char *childcmd = childCommands[i];
 
+    // pa step 1. init pipe pairs
     StdioPipes stdioPipes;
     memset(&stdioPipes, -1, sizeof(stdioPipes));
     ::pipe(PSTDIN(stdioPipes));
     ::pipe(PSTDOUT(stdioPipes));
     ::pipe(PSTDERR(stdioPipes));
 
-    pid_t pidChild = fork(); // create child process that is a clone of the parent
+    // pa step 2. create child process that is a clone of the parent
+    pid_t pidChild = fork();
     if (pidChild == 0)
     {
-      log(LOGF_TRACE, "C%02u[%s] spawned: %d<%d, %d>%d, %d>%d", i+1, childcmd,
-        PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
+      log(LOGF_TRACE, "CH%02u[%s] spawned: %d<%d, %d>%d, %d>%d", i + 1, childcmd,
+          PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
 
-      // this the child process, remap the pipe to local stdXX
+      std::string cmdline = childcmd;
+
+      // this the child process
+      // child step 1. remap the pipe to local stdXX
       ::dup2(PSTDIN(stdioPipes)[0], STDIN_FILENO);
       ::close(PSTDIN(stdioPipes)[0]), ::close(PSTDIN(stdioPipes)[1]);
       ::dup2(PSTDOUT(stdioPipes)[1], STDOUT_FILENO);
@@ -305,6 +312,7 @@ int main(int argc, char *argv[])
       ::dup2(PSTDERR(stdioPipes)[1], STDERR_FILENO);
       ::close(PSTDERR(stdioPipes)[0]), ::close(PSTDERR(stdioPipes)[1]);
 
+      // child step 2. prepare the child command line
       int childargc = 0;
       char *childargv[32];
       for (char *p2 = strtok(childcmd, " "); p2 && childargc < (int)(sizeof(childargv) / sizeof(childargv[0])) - 1; childargc++)
@@ -315,40 +323,31 @@ int main(int argc, char *argv[])
 
       childargv[childargc++] = NULL;
 
-      log(LOGF_TRACE, "C%02u[%s] starts", i+1, childcmd);
-
+      // child step 3. launch the child command line
+      log(LOGF_TRACE, "CH%02u[%s] starts", i + 1, cmdline.c_str());
       int ret = execvp(childargv[0], childargv);
-      log(LOGF_TRACE, "C%02u[%s] exits(%d)", i+1, childcmd, ret);
-      return ret; // end of the child process
+
+      // child step 4. exitting
+      log(LOGF_TRACE, "CH%02u[%s] exited (%d)", i + 1, cmdline.c_str(), ret);
+      fsync(STDOUT_FILENO);
+      fsync(STDERR_FILENO);
+
+      exit(ret); // end of the child process
     }
 
+    // this is the parent process
     if (pidChild <= 0)
     {
-      log(LOGF_ERROR, "failed to create C%02u[%s]: pid(%d)", i, childcmd, pidChild);
+      log(LOGF_ERROR, "failed to create CH%02u[%s]: pid(%d)", i, childcmd, pidChild);
       return -100;
     }
 
-    // this is the parent process, close the pipe[0]s and only leave pipe[1]s open
+    // pa step 3. close the pipe peers and save a stub to the child
     ChildStub child;
     child.idx = i + 1;
     child.cmd = childcmd;
     child.pid = pidChild;
     child.status = 0;
-
-    // how to ensure the child has been started??
-    // wait till the child starts
-    // pid_t wpid =0;
-    // for (int j =0; j < 100; j++)
-    // {
-    //   wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
-    //   if (wpid != 0 || WIFEXITED(child.status))
-    //     break;
-
-    //   ::usleep(1000);
-    // }
-
-    // if (wpid != child.pid)
-    //   continue;
 
     // file descriptor unused in parent
     child.stdio[0] = child.stdio[1] = child.stdio[2] = -1;
@@ -358,14 +357,15 @@ int main(int argc, char *argv[])
     child.stdio[1] = PSTDOUT(stdioPipes)[0];
     ::close(PSTDERR(stdioPipes)[1]);
     child.stdio[2] = PSTDERR(stdioPipes)[0];
-//    for (int j = 0; j < 3; j++)
-//      ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
+    for (int j = 0; j < 3; j++)
+      ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
     children.push_back(child);
-    log(LOGF_TRACE, "C%02u[%s] created: pid(%d) %d>%d, %d<%d, %d<%d", child.idx, child.cmd, child.pid, 
-      PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
+    log(LOGF_TRACE, "CH%02u[%s] created: pid(%d) %d>%d, %d<%d, %d<%d", child.idx, child.cmd, child.pid,
+        PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
   }
 
+  // pa step 4. build up the link exchanges
   log(LOGF_TRACE, "created %u child(s), making up the links", children.size());
   for (size_t i = 0; i < fdLinks.size(); i++)
   {
@@ -375,7 +375,7 @@ int main(int argc, char *argv[])
     // TODO
   }
 
-  // scan and audit the linkages
+  // scan and compress the linkages
   for (size_t i = 0; i < children.size(); i++)
   {
     ChildStub &child = children[i];
@@ -404,34 +404,34 @@ int main(int argc, char *argv[])
     }
   }
 
+  // pa step 5. start the main loop
   int maxTimeouts = cmdOpts.secsTimeout * 1000 / CHECK_INTERVAL;
-  bool bChildCheckNeeded =false;
-  // long long stampLastCheck =0;
-  int nIdles =0;
+  bool bChildCheckNeeded = false;
+  int nIdles = 0;
 
   for (int timeouts = 0; !gQuit && (maxTimeouts < 0 || timeouts < maxTimeouts);)
   {
-    if (bChildCheckNeeded || nIdles > (10000/CHECK_INTERVAL))
+    // pa step 5.1 check the child processes
+    if (bChildCheckNeeded || nIdles > (10000 / CHECK_INTERVAL))
     {
-      // long long stampNow = now();
-      // if ((stampNow - stampLastCheck) > 10000) // at least 10sec
-      // {
-        // stampLastCheck = stampNow;
-        nIdles =0;
-        for (size_t j = 0; !gQuit && j < children.size(); j++)
+      nIdles = 0;
+      for (size_t j = 0; !gQuit && j < children.size(); j++)
+      {
+        ChildStub &child = children[j];
+        pid_t wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
+        if (wpid != 0)                                                       // WNOHANG returns 0 when child is still running
         {
-          ChildStub &child = children[j];
-          pid_t wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
-          if (wpid != 0) // || WIFEXITED(child.status))                    // return wpid == child.pid && WIFEXITED(child.status) ? WEXITSTATUS(child.status) : -1;
-          {
-            log(LOGF_TRACE, "C%02u[%s] seems gone: %d->pid(%d) status(0x%x)", child.idx, child.cmd, wpid, child.pid, child.status);
-            closePipesToChild(child);
-          }
+          int c = closePipesToChild(child);
+          if (wpid == child.pid)
+            log(LOGF_TRACE, "CH%02u[%s] exited: pid(%d) status(0x%x)", child.idx, child.cmd, child.pid, child.status);
+          else if (c > 0)
+            log(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
         }
-      // }
+      }
     }
 
-    int bytesChildrenIO =0;
+    // pa step 5.2 prepare fdset for select()
+    int bytesChildrenIO = 0;
 
     fd_set fdread, fderr;
     FD_ZERO(&fdread);
@@ -452,13 +452,14 @@ int main(int argc, char *argv[])
       SET_VALID_FD_IN(fd, fderr, maxfd);
     }
 
-    if (maxfd <= STDERR_FILENO)
+    if (maxfd <= STDERR_FILENO && children.size() > 0)
     {
       // no child seems alive, quit
       gQuit = true;
       break;
     }
 
+    // pa step 5.3 do select()
     struct timeval timeout;
     timeout.tv_sec = CHECK_INTERVAL / 1000;
     timeout.tv_usec = (CHECK_INTERVAL % 1000) * 1000;
@@ -467,7 +468,8 @@ int main(int argc, char *argv[])
     if (gQuit)
       break;
 
-    if (rc < 0) // select(), quit
+    // pa step 5.4  select() dispatching
+    if (rc < 0) // select() err, quit
     {
       log(LOGF_ERROR, "io wait got (%d) error(%d), quiting", rc, errno);
       break;
@@ -479,43 +481,49 @@ int main(int argc, char *argv[])
       continue;
     }
 
-    // about this stdin
+    // pa step 5.5 about this stdin
     {
       int fdStdin = STDIN_FILENO;
       ssize_t n = procfd(fdStdin, fdread, fderr, out2fds, STDOUT_FILENO);
 
-      if (n >0)
+      if (n <= 0 && children.empty())
+        break;
+
+      if (n > 0)
       {
-      // TODO: bitrate control
+        // TODO: bitrate control
       }
     }
 
+    // pa step 5.6 scan if any child has IO occured
     for (size_t i = 0; !gQuit && i < children.size(); i++)
     {
       ChildStub &child = children[i];
-      ssize_t n =0;
+      ssize_t n = 0;
 
       // about the child's stdout
       n = procfd(CHILDOUT(child), fdread, fderr, child.out2fds, STDOUT_FILENO, child.idx);
-      
-      if (n <0)
+
+      if (n < 0)
         bChildCheckNeeded = true;
-      else bytesChildrenIO += n;
+      else
+        bytesChildrenIO += n;
 
       // about the child's stderr
-      n =procfd(CHILDERR(child), fdread, fderr, child.err2fds, STDERR_FILENO, child.idx);
-      if (n <0)
+      n = procfd(CHILDERR(child), fdread, fderr, child.err2fds, STDERR_FILENO, child.idx);
+      if (n < 0)
         bChildCheckNeeded = true;
-      else bytesChildrenIO += n;
+      else
+        bytesChildrenIO += n;
     }
 
-    if (bytesChildrenIO <=0)
+    if (bytesChildrenIO <= 0)
       nIdles++;
 
   } // end of select() loop
 
-  // close all pipes that are still openning
-  log(LOGF_TRACE, "end of loop, closing %u child(s)", children.size());
+  // pa step 6. close all pipes that are still openning
+  log(LOGF_TRACE, "end of loop, cleaning up %u child(s)", children.size());
   for (size_t i = 0; i < children.size(); i++)
     closePipesToChild(children[i]);
 
