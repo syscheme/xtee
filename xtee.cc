@@ -17,7 +17,7 @@ extern "C"
 #include <set>
 
 #define EOL "\r\n"
-#define CHECK_INTERVAL (500) // 500msec
+#define CHECK_INTERVAL (100) // 100msec
 
 bool gQuit = false;
 
@@ -27,15 +27,16 @@ bool gQuit = false;
 void usage()
 {
   std::cout << "Usage: xtee {-n|[-a] <file>} [-s <bps>] [-k <bytes>] [-t <secs>] [-d <secs>] [-q <secs>]" EOL
-            << "            [-c <cmdline>] [-l <TARGET>:<SOURCE>]" EOL EOL
+            << "            [-c <cmdline>] [-l <TARGET>:<SOURCE>] [-e <flags>]" EOL EOL
             << "Options:" EOL
-            << "  -v <level>           verbose level, default 4 to output progress onto stderr" EOL
+            << "  -e <flags>           verbose flags, default 4 to output progress onto stderr" EOL
             << "  -a                   append to the output file" EOL
             << "  -n                   no output file other than stdout" EOL
-            << "  -s <bps>             limits the transfer bitrate at reading from stdin in bps" EOL
+            << "  -s <kbps>             limits the transfer bitrate in kbps at reading from stdin in bps" EOL
             << "  -k <bytes>           skips a certain amount of bytes at the beginning of reading from stdin" EOL
             << "  -t <secs>            skips the given seconds of data at reading from stdin" EOL
             << "  -d <secs>            duration in seconds to run" EOL
+            << "  -i <secs>            interval in seconds to info progress" EOL
             << "  -q <secs>            timeout in seconds when no more data can be read from stdin" EOL
             << "  -c <cmdline>         the child command line to execute" EOL
             << "  -l <TARGET>:<SOURCE> links the source fd to the target fd, <TARGET> or <SOURCE> is in format of" EOL
@@ -48,36 +49,40 @@ void usage()
             << "       xtee -c \"ls -l\" -c \"sort\" -c \"grep txt\" -l 1.1:2.0 -l 1.1:3.0" EOL
             << "  b) the following equal commands download from a web at a limited speed of 3.75Mbps, zip and save" EOL
             << "     as a file:" EOL
-            << "       xtee -c \"wget -O - http://…\" -c \"zip - -o file.zip\" -l 0:1.1 -l 2.0:1 -n -s 3750000" EOL
-            << "       wget -O - http://… | xtee -c \"zip - -o file.zip\" -l 2.0:1 -n -s 3750000" EOL
-            << "       wget -O - http://… | xtee -n -s 3750000 | zip - -o file.zip" EOL
+            << "       xtee -c \"wget -O - http://…\" -c \"zip - -o file.zip\" -l 0:1.1 -l 2.0:1 -n -s 3750" EOL
+            << "       wget -O - http://… | xtee -c \"zip - -o file.zip\" -l 2.0:1 -n -s 3750" EOL
+            << "       wget -O - http://… | xtee -n -s 3750 | zip - -o file.zip" EOL
             << EOL;
 }
 
-#define LOGF_TRACE (1 << 0)
-#define LOGF_ERROR (1 << 1)
+#define FLAG_TRACE     (1 << 0)
+#define FLAG_ERROR     (1 << 1)
+#define FLAG_TAGFWD    (1 << 2)
+#define FLAG_PROGRESS  (1 << 3)
 
 typedef struct
 {
   bool noOutFile;
   bool append;
-  long bitrate;
+  long kbps;
   long bytesToSkip;
   int secsToSkip;
   int secsDuration;
   int secsTimeout;
-  unsigned int logflags;
+  int secsProgressIntv;
+  unsigned int flags;
 } CmdOptions;
 
 CmdOptions cmdOpts = {
     .noOutFile = false,
     .append = false,
-    .bitrate = -1,
+    .kbps = -1,
     .bytesToSkip = -1,
     .secsToSkip = -1,
     .secsDuration = -1,
     .secsTimeout = -1,
-    .logflags = 0xff};
+    .secsProgressIntv = 10,
+    .flags = 0xff};
 
 typedef int Pipe[2];
 typedef Pipe StdioPipes[3];
@@ -117,31 +122,9 @@ FDSet out2fds;
       _MAXFD = _FD;                          \
   }
 
-// -----------------------------
-// log()
-// -----------------------------
-#define LOG_LINE_MAX_BUF (256)
-int log(unsigned int category, const char *fmt, ...)
-{
-  if (0 == (cmdOpts.logflags & category))
-    return 0;
+void auditStdIn(uint nbytesByPassed);
+int log(unsigned int category, const char *fmt, ...);
 
-  char msg[LOG_LINE_MAX_BUF];
-  va_list args;
-
-  va_start(args, fmt);
-  int nCount = ::vsnprintf(msg, LOG_LINE_MAX_BUF - 8, fmt, args);
-  va_end(args);
-  msg[LOG_LINE_MAX_BUF - 8] = '\0';
-
-  if (nCount < 0)
-    nCount = 0;
-
-  msg[nCount++] = '\r';
-  msg[nCount++] = '\n';
-  msg[nCount++] = '\0';
-  return ::write(STDERR_FILENO, msg, nCount);
-}
 
 static long long now()
 {
@@ -164,17 +147,14 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
   {
     if (fwdset.empty())
     {
-      if (defaultfd == STDERR_FILENO && childIdx > 0)
+      if ((FLAG_TAGFWD & cmdOpts.flags) && defaultfd == STDERR_FILENO && childIdx > 0)
       {
         char cIdent[20];
-        snprintf(cIdent, sizeof(cIdent) - 2, "CH%02u> ", (unsigned)childIdx);
+        snprintf(cIdent, sizeof(cIdent) - 2, EOL "CH%02u:%d$>", (unsigned)childIdx, n);
         ::write(defaultfd, cIdent, strlen(cIdent));
       }
 
       ::write(defaultfd, buf, n);
-
-      if (defaultfd == STDERR_FILENO && childIdx > 0)
-        ::write(defaultfd, EOL, sizeof(EOL) - 1);
     }
     else
     {
@@ -188,7 +168,7 @@ ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int 
 
   if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
   {
-    log(LOGF_TRACE, "CH%02u[%s] closing error fd(%d)", childIdx, fd);
+    log(FLAG_TRACE, "CH%02u[%s] closing error fd(%d)", childIdx, fd);
     ::close(fd);
     fd = -1;
     n = -1;
@@ -216,7 +196,7 @@ int closePipesToChild(ChildStub &child)
   }
 
   if (nClosed > 0)
-    log(LOGF_TRACE, "closed %d link(s) to C%02d[%s]", nClosed, child.idx, child.cmd);
+    log(FLAG_TRACE, "closed %d link(s) to C%02d[%s]", nClosed, child.idx, child.cmd);
 
   return nClosed;
 }
@@ -234,7 +214,7 @@ int main(int argc, char *argv[])
   }
 
   int opt = 0;
-  while (-1 != (opt = getopt(argc, argv, "hnas:k:t:d:q:c:l:")))
+  while (-1 != (opt = getopt(argc, argv, "hnas:k:t:d:q:c:l:e:i:")))
   {
     switch (opt)
     {
@@ -247,7 +227,15 @@ int main(int argc, char *argv[])
       break;
 
     case 's':
-      cmdOpts.bitrate = atol(optarg);
+      cmdOpts.kbps = atol(optarg);
+      break;
+
+    case 'e':
+      cmdOpts.flags = atoi(optarg);
+      break;
+
+    case 'i':
+      cmdOpts.secsProgressIntv = atoi(optarg);
       break;
 
     case 'k':
@@ -298,7 +286,7 @@ int main(int argc, char *argv[])
     pid_t pidChild = fork();
     if (pidChild == 0)
     {
-      log(LOGF_TRACE, "CH%02u[%s] spawned: %d<%d, %d>%d, %d>%d", i + 1, childcmd,
+      log(FLAG_TRACE, "CH%02u[%s] spawned: %d<%d, %d>%d, %d>%d", i + 1, childcmd,
           PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
 
       std::string cmdline = childcmd;
@@ -324,11 +312,11 @@ int main(int argc, char *argv[])
       childargv[childargc++] = NULL;
 
       // child step 3. launch the child command line
-      log(LOGF_TRACE, "CH%02u[%s] starts", i + 1, cmdline.c_str());
+      log(FLAG_TRACE, "CH%02u[%s] starts", i + 1, cmdline.c_str());
       int ret = execvp(childargv[0], childargv);
 
       // child step 4. exitting
-      log(LOGF_TRACE, "CH%02u[%s] exited (%d)", i + 1, cmdline.c_str(), ret);
+      log(FLAG_TRACE, "CH%02u[%s] exited (%d)", i + 1, cmdline.c_str(), ret);
       fsync(STDOUT_FILENO);
       fsync(STDERR_FILENO);
 
@@ -338,7 +326,7 @@ int main(int argc, char *argv[])
     // this is the parent process
     if (pidChild <= 0)
     {
-      log(LOGF_ERROR, "failed to create CH%02u[%s]: pid(%d)", i, childcmd, pidChild);
+      log(FLAG_ERROR, "failed to create CH%02u[%s]: pid(%d)", i, childcmd, pidChild);
       return -100;
     }
 
@@ -361,12 +349,12 @@ int main(int argc, char *argv[])
       ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
     children.push_back(child);
-    log(LOGF_TRACE, "CH%02u[%s] created: pid(%d) %d>%d, %d<%d, %d<%d", child.idx, child.cmd, child.pid,
+    log(FLAG_TRACE, "CH%02u[%s] created: pid(%d) %d>%d, %d<%d, %d<%d", child.idx, child.cmd, child.pid,
         PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
   }
 
   // pa step 4. build up the link exchanges
-  log(LOGF_TRACE, "created %u child(s), making up the links", children.size());
+  log(FLAG_TRACE, "created %u child(s), making up the links", children.size());
   for (size_t i = 0; i < fdLinks.size(); i++)
   {
     const char *delimitor = strchr(fdLinks[i], ':'); // strchr(fdLinks[i].c_str(), ':');
@@ -423,9 +411,9 @@ int main(int argc, char *argv[])
         {
           int c = closePipesToChild(child);
           if (wpid == child.pid)
-            log(LOGF_TRACE, "CH%02u[%s] exited: pid(%d) status(0x%x)", child.idx, child.cmd, child.pid, child.status);
+            log(FLAG_TRACE, "CH%02u[%s] exited: pid(%d) status(0x%x)", child.idx, child.cmd, child.pid, child.status);
           else if (c > 0)
-            log(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
+            log(FLAG_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
         }
       }
     }
@@ -471,7 +459,7 @@ int main(int argc, char *argv[])
     // pa step 5.4  select() dispatching
     if (rc < 0) // select() err, quit
     {
-      log(LOGF_ERROR, "io wait got (%d) error(%d), quiting", rc, errno);
+      log(FLAG_ERROR, "io wait got (%d) error(%d), quiting", rc, errno);
       break;
     }
     else if (0 == rc) // timeout
@@ -490,8 +478,9 @@ int main(int argc, char *argv[])
         break;
 
       if (n > 0)
+        auditStdIn(n);
       {
-        // TODO: bitrate control
+        // TODO: kbps control
       }
     }
 
@@ -523,9 +512,73 @@ int main(int argc, char *argv[])
   } // end of select() loop
 
   // pa step 6. close all pipes that are still openning
-  log(LOGF_TRACE, "end of loop, cleaning up %u child(s)", children.size());
+  log(FLAG_TRACE, "end of loop, cleaning up %u child(s)", children.size());
   for (size_t i = 0; i < children.size(); i++)
     closePipesToChild(children[i]);
 
   return 0;
+}
+
+#define TIMEWIN_MSEC CHECK_INTERVAL
+
+void auditStdIn(uint nbytesByPassed)
+{
+  static uint nbytesCountedInTimeWin =0;
+  static long long stampTimeWinStart = now();
+  static uint nbytesToBeInTimeWin =0;
+  static uint cWinsStepped =0;
+  static long long offset = 0;
+  
+  if (nbytesToBeInTimeWin <=0 && cmdOpts.kbps >0)
+    nbytesToBeInTimeWin = cmdOpts.kbps * TIMEWIN_MSEC *8;
+
+  nbytesCountedInTimeWin += nbytesByPassed;
+  offset  += nbytesByPassed;
+
+  if (nbytesCountedInTimeWin < nbytesToBeInTimeWin)
+    return; // yield for the next round
+
+  if (cmdOpts.kbps>0) 
+  {
+    int expectedDur = (int) (nbytesCountedInTimeWin *8 /cmdOpts.kbps);
+
+    long long stampNow = now();
+    int yield = expectedDur - (int) (stampNow - stampTimeWinStart);
+    if (yield > 0)
+      ::usleep(yield*1000);
+  }
+
+  stampTimeWinStart = now();
+  nbytesCountedInTimeWin =0;
+
+  if (cmdOpts.secsProgressIntv >0 && 0 == (++cWinsStepped % (cmdOpts.secsProgressIntv*1000 /TIMEWIN_MSEC))) // every 10sec
+  {
+      log(FLAG_PROGRESS, EOL "PGRS>offset=%lld;" EOL, offset);
+  }
+}
+
+// -----------------------------
+// log()
+// -----------------------------
+#define LOG_LINE_MAX_BUF (256)
+int log(unsigned int category, const char *fmt, ...)
+{
+  if (0 == (cmdOpts.flags & category))
+    return 0;
+
+  char msg[LOG_LINE_MAX_BUF];
+  va_list args;
+
+  va_start(args, fmt);
+  int nCount = ::vsnprintf(msg, LOG_LINE_MAX_BUF - 8, fmt, args);
+  va_end(args);
+  msg[LOG_LINE_MAX_BUF - 8] = '\0';
+
+  if (nCount < 0)
+    nCount = 0;
+
+  msg[nCount++] = '\r';
+  msg[nCount++] = '\n';
+  msg[nCount++] = '\0';
+  return ::write(STDERR_FILENO, msg, nCount);
 }
