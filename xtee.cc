@@ -379,14 +379,62 @@ int main(int argc, char *argv[])
   log(LOGF_TRACE, "created %u child(s), making up the links", children.size());
   for (size_t i = 0; i < fdLinks.size(); i++)
   {
-    const char *delimitor = strchr(fdLinks[i], ':'); // strchr(fdLinks[i].c_str(), ':');
-    if (NULL == delimitor)
+    char* dest = strtok(fdLinks[i], ":"), *src = strtok(0, ":"); // char *delimitor = strchr(fdLinks[i], ':'); // strchr(fdLinks[i].c_str(), ':');
+    if (NULL == dest || NULL == src)
       continue;
-    // TODO
+
+    int childIdDest =0, childFdDest =-1, childIdSrc =0, childFdSrc =-1;
+    char* strChildId = strtok(dest, ".");
+    char* strfd = strtok(0, ".");
+    if (NULL != strfd)
+    {
+      childFdDest = atoi(strfd);
+      childIdDest = atoi(strChildId);
+    }
+    else
+    {
+      childIdSrc = atoi(strChildId);
+      childFdDest = 0;
+    }
+
+    strChildId = strtok(src, ".");
+    strfd = strtok(0, ".");
+    if (NULL != strfd)
+    {
+      childFdSrc = atoi(strfd);
+      childIdSrc = atoi(strChildId);
+    }
+    else
+    {
+      childIdSrc = 0;
+      childFdDest = atoi(strChildId);
+    }
+
+    if (childIdDest > (int) children.size() || childIdSrc > (int)children.size() || STDIN_FILENO!=childFdDest || (childFdSrc!=STDOUT_FILENO && childFdSrc!=STDERR_FILENO))
+    {
+      log(LOGF_ERROR, "skip invalid link CH%02d:%d <- CH%02d:%d", childIdDest, childFdDest, childIdSrc, childFdSrc);
+      continue;
+    }
+
+    int destPipe = (childIdDest >0) ? children[childIdDest -1].stdio[0] : STDIN_FILENO;
+
+    int srcPipe = (childIdSrc >0) ? children[childIdSrc -1].stdio[childFdSrc] : childFdSrc;
+
+    if (childIdSrc >0)
+    {
+      ChildStub& child = children[childIdSrc -1];
+      FDSet& fwdset = (childFdSrc==STDOUT_FILENO) ? child.out2fds : child.err2fds;
+      fwdset.insert(destPipe);
+    }
+    else if (childFdSrc==STDOUT_FILENO)
+      out2fds.insert(destPipe);
+    else continue;
+
+    log(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest+1, childFdDest, srcPipe, childIdSrc+1, childFdSrc);
   }
 
   // scan and compress the linkages
-  for (size_t i = 0; i < children.size(); i++)
+  for (size_t i = 0; false && i < children.size(); i++) // -- disabled
   {
     ChildStub &child = children[i];
     if (child.out2fds.size() == 1)
