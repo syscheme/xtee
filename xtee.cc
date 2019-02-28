@@ -312,6 +312,15 @@ int main(int argc, char *argv[])
       ::dup2(PSTDERR(stdioPipes)[1], STDERR_FILENO);
       ::close(PSTDERR(stdioPipes)[0]), ::close(PSTDERR(stdioPipes)[1]);
 
+      for (size_t c = 0; c < children.size(); c++)
+      {
+        ChildStub &child = children[c];
+        for (int j = 0; j < 3; j++)
+          ::close(child.stdio[j]);
+      }
+
+      children.clear();
+
       // child step 2. prepare the child command line
       int childargc = 0;
       char *childargv[32];
@@ -357,6 +366,7 @@ int main(int argc, char *argv[])
     child.stdio[1] = PSTDOUT(stdioPipes)[0];
     ::close(PSTDERR(stdioPipes)[1]);
     child.stdio[2] = PSTDERR(stdioPipes)[0];
+
     for (int j = 0; j < 3; j++)
       ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
