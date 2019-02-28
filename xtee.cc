@@ -300,6 +300,15 @@ int main(int argc, char *argv[])
       ::dup2(PSTDERR(stdioPipes)[1], STDERR_FILENO);
       ::close(PSTDERR(stdioPipes)[0]), ::close(PSTDERR(stdioPipes)[1]);
 
+      for (size_t c = 0; c < children.size(); c++)
+      {
+        ChildStub &child = children[c];
+        for (int j = 0; j < 3; j++)
+          ::close(child.stdio[j]);
+      }
+
+      children.clear();
+
       // child step 2. prepare the child command line
       int childargc = 0;
       char *childargv[32];
@@ -345,6 +354,7 @@ int main(int argc, char *argv[])
     child.stdio[1] = PSTDOUT(stdioPipes)[0];
     ::close(PSTDERR(stdioPipes)[1]);
     child.stdio[2] = PSTDERR(stdioPipes)[0];
+
     for (int j = 0; j < 3; j++)
       ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
@@ -357,14 +367,62 @@ int main(int argc, char *argv[])
   log(FLAG_TRACE, "created %u child(s), making up the links", children.size());
   for (size_t i = 0; i < fdLinks.size(); i++)
   {
-    const char *delimitor = strchr(fdLinks[i], ':'); // strchr(fdLinks[i].c_str(), ':');
-    if (NULL == delimitor)
+    char* dest = strtok(fdLinks[i], ":"), *src = strtok(0, ":"); // char *delimitor = strchr(fdLinks[i], ':'); // strchr(fdLinks[i].c_str(), ':');
+    if (NULL == dest || NULL == src)
       continue;
-    // TODO
+
+    int childIdDest =0, childFdDest =-1, childIdSrc =0, childFdSrc =-1;
+    char* strChildId = strtok(dest, ".");
+    char* strfd = strtok(0, ".");
+    if (NULL != strfd)
+    {
+      childFdDest = atoi(strfd);
+      childIdDest = atoi(strChildId);
+    }
+    else
+    {
+      childIdSrc = atoi(strChildId);
+      childFdDest = 0;
+    }
+
+    strChildId = strtok(src, ".");
+    strfd = strtok(0, ".");
+    if (NULL != strfd)
+    {
+      childFdSrc = atoi(strfd);
+      childIdSrc = atoi(strChildId);
+    }
+    else
+    {
+      childIdSrc = 0;
+      childFdDest = atoi(strChildId);
+    }
+
+    if (childIdDest > (int) children.size() || childIdSrc > (int)children.size() || STDIN_FILENO!=childFdDest || (childFdSrc!=STDOUT_FILENO && childFdSrc!=STDERR_FILENO))
+    {
+      log(LOGF_ERROR, "skip invalid link CH%02d:%d <- CH%02d:%d", childIdDest, childFdDest, childIdSrc, childFdSrc);
+      continue;
+    }
+
+    int destPipe = (childIdDest >0) ? children[childIdDest -1].stdio[0] : STDIN_FILENO;
+
+    int srcPipe = (childIdSrc >0) ? children[childIdSrc -1].stdio[childFdSrc] : childFdSrc;
+
+    if (childIdSrc >0)
+    {
+      ChildStub& child = children[childIdSrc -1];
+      FDSet& fwdset = (childFdSrc==STDOUT_FILENO) ? child.out2fds : child.err2fds;
+      fwdset.insert(destPipe);
+    }
+    else if (childFdSrc==STDOUT_FILENO)
+      out2fds.insert(destPipe);
+    else continue;
+
+    log(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest+1, childFdDest, srcPipe, childIdSrc+1, childFdSrc);
   }
 
   // scan and compress the linkages
-  for (size_t i = 0; i < children.size(); i++)
+  for (size_t i = 0; false && i < children.size(); i++) // -- disabled
   {
     ChildStub &child = children[i];
     if (child.out2fds.size() == 1)
