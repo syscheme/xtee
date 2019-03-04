@@ -5,18 +5,19 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
 
 extern "C"
 {
-#include <unistd.h>
-#include <sys/wait.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <fcntl.h>
-#include <stdarg.h>
-#include <errno.h>
-#include <sys/time.h>
+    #include <unistd.h>
+    #include <sys/wait.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <fcntl.h>
+    #include <stdarg.h>
+    #include <errno.h>
+    #include <sys/time.h>
 }
 
 #define EOL "\r\n"
@@ -71,10 +72,11 @@ protected:
   typedef std::vector<ChildStub> Children;
   Children _children;
   FDSet _stdin2fwd;
+  typedef std::map<int, FDSet> ForwardMap;
 
-  int log(unsigned int category, const char *fmt, ...);
+  int     log(unsigned int category, const char *fmt, ...);
   ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd, int childIdx = -1);
-  int closePipesToChild(ChildStub &child);
+  int     closePipesToChild(ChildStub &child);
 
   bool _bQuit = false;
   typedef std::vector<char *> Strings;

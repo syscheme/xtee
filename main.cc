@@ -1,4 +1,4 @@
-#include "xtee.cc"
+#include "xtee.hh"
 
 // -----------------------------
 // usage()
