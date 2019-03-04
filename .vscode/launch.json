@@ -9,7 +9,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/xtee",
-            "args": ["-s", "3750000", "-c", "find /root", "-c", "sort", "-l", "2:1.1"],
+            "args": ["-s", "3750000", "-c", "find /tmp", "-c", "sort", "-l", "2:1.1"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

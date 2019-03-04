@@ -215,6 +215,22 @@ int closePipesToChild(ChildStub &child)
     }
   }
 
+    for (FDSet::iterator it = child.out2fds.begin(); it != child.out2fds.end(); it++)
+    {
+      if (*it > STDERR_FILENO)
+        ::close(*it);
+    }
+
+    child.out2fds.clear();
+
+    for (FDSet::iterator it = child.err2fds.begin(); it != child.err2fds.end(); it++)
+    {
+      if (*it > STDERR_FILENO)
+        ::close(*it);
+    }
+
+    child.err2fds.clear();
+
   if (nClosed > 0)
     log(LOGF_TRACE, "closed %d link(s) to C%02d[%s]", nClosed, child.idx, child.cmd);
 
