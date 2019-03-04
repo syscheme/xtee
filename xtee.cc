@@ -393,7 +393,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-      childIdSrc = atoi(strChildId);
+      childIdDest = atoi(strChildId);
       childFdDest = 0;
     }
 
@@ -407,7 +407,7 @@ int main(int argc, char *argv[])
     else
     {
       childIdSrc = 0;
-      childFdDest = atoi(strChildId);
+      childFdSrc = atoi(strChildId);
     }
 
     if (childIdDest > (int) children.size() || childIdSrc > (int)children.size() || STDIN_FILENO!=childFdDest || (childFdSrc!=STDOUT_FILENO && childFdSrc!=STDERR_FILENO))
@@ -430,7 +430,7 @@ int main(int argc, char *argv[])
       out2fds.insert(destPipe);
     else continue;
 
-    log(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest+1, childFdDest, srcPipe, childIdSrc+1, childFdSrc);
+    log(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
   }
 
   // scan and compress the linkages
