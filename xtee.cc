@@ -416,7 +416,7 @@ int main(int argc, char *argv[])
 
     if (childIdDest > (int) children.size() || childIdSrc > (int)children.size() || STDIN_FILENO!=childFdDest || (childFdSrc!=STDOUT_FILENO && childFdSrc!=STDERR_FILENO))
     {
-      log(LOGF_ERROR, "skip invalid link CH%02d:%d <- CH%02d:%d", childIdDest, childFdDest, childIdSrc, childFdSrc);
+      log(FLAG_ERROR, "skip invalid link CH%02d:%d <- CH%02d:%d", childIdDest, childFdDest, childIdSrc, childFdSrc);
       continue;
     }
 
@@ -434,7 +434,7 @@ int main(int argc, char *argv[])
       out2fds.insert(destPipe);
     else continue;
 
-    log(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
+    log(FLAG_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
   }
 
   // scan and compress the linkages
