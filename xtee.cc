@@ -1,3 +1,5 @@
+#include "xtee.hh"
+
 extern "C"
 {
 #include <unistd.h>
@@ -10,75 +12,6 @@ extern "C"
 #include <errno.h>
 #include <sys/time.h>
 }
-
-#include <iostream>
-#include <string>
-#include <vector>
-#include <set>
-
-#define EOL "\r\n"
-#define CHECK_INTERVAL (500) // 500msec
-
-#define LOGF_TRACE (1 << 0)
-#define LOGF_ERROR (1 << 1)
-
-// -----------------------------
-// class Xtee
-// -----------------------------
-class Xtee
-{
-public:
-  typedef struct
-  {
-    bool noOutFile;
-    bool append;
-    long bitrate;
-    long bytesToSkip;
-    int secsToSkip;
-    int secsDuration;
-    int secsTimeout;
-    unsigned int logflags;
-  } Options;
-
-  Xtee();
-  virtual ~Xtee() {}
-
-  int run();
-
-  int pushCommand(char* cmd);
-  int pushLink(char* link);
-
-  Options _options;
-
-protected:
-  typedef int Pipe[2];
-  typedef Pipe StdioPipes[3];
-  typedef std::set<int> FDSet;
-
-  typedef struct _ChildStub
-  {
-    int  idx;
-    char *cmd;
-    int stdio[3];
-    FDSet fwdStdout, fwdStderr;
-    int pid;
-    int status;
-  } ChildStub;
-
-  typedef std::vector<ChildStub> Children;
-  Children _children;
-  FDSet _stdin2fwd;
-
-  int log(unsigned int category, const char *fmt, ...);
-  ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd, int childIdx = -1);
-  int closePipesToChild(ChildStub &child);
-
-  bool _bQuit = false;
-  typedef std::vector<char *> Strings;
-  Strings _childCommands, _fdLinks;
-};
-
-/////////////////////////////////////////////////////////
 
 #define PSTDIN(_PIO) (_PIO[0])
 #define PSTDOUT(_PIO) (_PIO[1])
@@ -98,10 +31,10 @@ protected:
   }
 
 // -----------------------------
-// log()
+// errlog()
 // -----------------------------
 #define LOG_LINE_MAX_BUF (256)
-int Xtee::log(unsigned int category, const char *fmt, ...)
+int Xtee::errlog(unsigned int category, const char *fmt, ...)
 {
   char buf[1024] = {0};
 
@@ -135,17 +68,15 @@ static long long now()
 }
 
 Xtee::Xtee()
-: _options({
-    .noOutFile = false,
-    .append = false,
-    .bitrate = -1,
-    .bytesToSkip = -1,
-    .secsToSkip = -1,
-    .secsDuration = -1,
-    .secsTimeout = -1,
-    .logflags = 0xff})
+    : _options({.noOutFile = false,
+                .append = false,
+                .bitrate = -1,
+                .bytesToSkip = -1,
+                .secsToSkip = -1,
+                .secsDuration = -1,
+                .secsTimeout = -1,
+                .logflags = 0xff})
 {
-
 }
 
 int Xtee::pushCommand(char *cmd)
@@ -168,9 +99,9 @@ int Xtee::pushLink(char *link)
 // procfd()
 // -----------------------------
 char buf[1024] = {0};
-ssize_t Xtee::procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd, int childIdx)
+int Xtee::procfd(int &fd, fd_set &fdread, fd_set &fderr, const Xtee::FDSet &fwdset, int defaultfd, int childIdx)
 {
-  ssize_t n = 0;
+  int n = 0;
 
   if (IS_VALID_FLAG_SET(fd, fdread) && (n = ::read(fd, buf, sizeof(buf))) > 0)
   {
@@ -200,7 +131,7 @@ ssize_t Xtee::procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset
 
   if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
   {
-    log(LOGF_TRACE, "CH%02u[%s] closing error fd(%d)", childIdx, fd);
+    errlog(LOGF_TRACE, "CH%02u[%s] closing error fd(%d)", childIdx, fd);
     ::close(fd);
     fd = -1;
     n = -1;
@@ -227,11 +158,11 @@ int Xtee::closePipesToChild(ChildStub &child)
     }
   }
 
-  for (FDSet::iterator it = child.fwdStdout.begin(); it != child.fwdStdout.end(); it++)
-  {
-    if (*it > STDERR_FILENO)
-      ::close(*it);
-  }
+    for (FDSet::iterator it = child.fwdStdout.begin(); it != child.fwdStdout.end(); it++)
+    {
+      if (*it > STDERR_FILENO)
+        ::close(*it);
+    }
 
   child.fwdStdout.clear();
 
@@ -244,7 +175,7 @@ int Xtee::closePipesToChild(ChildStub &child)
   child.fwdStderr.clear();
 
   if (nClosed > 0)
-    log(LOGF_TRACE, "closed %d link(s) to C%02d[%s]", nClosed, child.idx, child.cmd);
+    errlog(LOGF_TRACE, "closed %d link(s) to C%02d[%s]", nClosed, child.idx, child.cmd);
 
   return nClosed;
 }
@@ -271,8 +202,8 @@ int Xtee::run()
     pid_t pidChild = fork();
     if (pidChild == 0)
     {
-      log(LOGF_TRACE, "CH%02u[%s] spawned: %d<%d, %d>%d, %d>%d", i + 1, childcmd,
-          PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
+      errlog(LOGF_TRACE, "CH%02u[%s] spawned: %d<%d, %d>%d, %d>%d", i + 1, childcmd,
+             PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
 
       std::string cmdline = childcmd;
 
@@ -306,11 +237,11 @@ int Xtee::run()
       childargv[childargc++] = NULL;
 
       // child step 3. launch the child command line
-      log(LOGF_TRACE, "CH%02u[%s] starts", i + 1, cmdline.c_str());
+      errlog(LOGF_TRACE, "CH%02u[%s] starts", i + 1, cmdline.c_str());
       int ret = execvp(childargv[0], childargv);
 
       // child step 4. exitting
-      log(LOGF_TRACE, "CH%02u[%s] exited (%d)", i + 1, cmdline.c_str(), ret);
+      errlog(LOGF_TRACE, "CH%02u[%s] exited (%d)", i + 1, cmdline.c_str(), ret);
       fsync(STDOUT_FILENO);
       fsync(STDERR_FILENO);
 
@@ -320,7 +251,7 @@ int Xtee::run()
     // this is the parent process
     if (pidChild <= 0)
     {
-      log(LOGF_ERROR, "failed to create CH%02u[%s]: pid(%d)", i, childcmd, pidChild);
+      errlog(LOGF_ERROR, "failed to create CH%02u[%s]: pid(%d)", i, childcmd, pidChild);
       return -100;
     }
 
@@ -344,21 +275,21 @@ int Xtee::run()
       ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
     _children.push_back(child);
-    log(LOGF_TRACE, "CH%02u[%s] created: pid(%d) %d>%d, %d<%d, %d<%d", child.idx, child.cmd, child.pid,
-        PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
+    errlog(LOGF_TRACE, "CH%02u[%s] created: pid(%d) %d>%d, %d<%d, %d<%d", child.idx, child.cmd, child.pid,
+           PSTDIN(stdioPipes)[0], PSTDIN(stdioPipes)[1], PSTDOUT(stdioPipes)[0], PSTDOUT(stdioPipes)[1], PSTDERR(stdioPipes)[0], PSTDERR(stdioPipes)[1]);
   }
 
   // pa step 4. build up the link exchanges
-  log(LOGF_TRACE, "created %u child(s), making up the links", _children.size());
+  errlog(LOGF_TRACE, "created %u child(s), making up the links", _children.size());
   for (size_t i = 0; i < _fdLinks.size(); i++)
   {
-    char* dest = strtok(_fdLinks[i], ":"), *src = strtok(0, ":"); // char *delimitor = strchr(_fdLinks[i], ':'); // strchr(_fdLinks[i].c_str(), ':');
+    char *dest = strtok(_fdLinks[i], ":"), *src = strtok(0, ":"); // char *delimitor = strchr(_fdLinks[i], ':'); // strchr(_fdLinks[i].c_str(), ':');
     if (NULL == dest || NULL == src)
       continue;
 
-    int childIdDest =0, childFdDest =-1, childIdSrc =0, childFdSrc =-1;
-    char* strChildId = strtok(dest, ".");
-    char* strfd = strtok(0, ".");
+    int childIdDest = 0, childFdDest = -1, childIdSrc = 0, childFdSrc = -1;
+    char *strChildId = strtok(dest, ".");
+    char *strfd = strtok(0, ".");
     if (NULL != strfd)
     {
       childFdDest = atoi(strfd);
@@ -383,27 +314,28 @@ int Xtee::run()
       childFdSrc = atoi(strChildId);
     }
 
-    if (childIdDest > (int) _children.size() || childIdSrc > (int)_children.size() || STDIN_FILENO!=childFdDest || (childFdSrc!=STDOUT_FILENO && childFdSrc!=STDERR_FILENO))
+    if (childIdDest > (int)_children.size() || childIdSrc > (int)_children.size() || STDIN_FILENO != childFdDest || (childFdSrc != STDOUT_FILENO && childFdSrc != STDERR_FILENO))
     {
-      log(LOGF_ERROR, "skip invalid link CH%02d:%d <- CH%02d:%d", childIdDest, childFdDest, childIdSrc, childFdSrc);
+      errlog(LOGF_ERROR, "skip invalid link CH%02d:%d <- CH%02d:%d", childIdDest, childFdDest, childIdSrc, childFdSrc);
       continue;
     }
 
-    int destPipe = (childIdDest >0) ? _children[childIdDest -1].stdio[0] : STDIN_FILENO;
+    int destPipe = (childIdDest > 0) ? _children[childIdDest - 1].stdio[0] : STDIN_FILENO;
 
-    int srcPipe = (childIdSrc >0) ? _children[childIdSrc -1].stdio[childFdSrc] : childFdSrc;
+    int srcPipe = (childIdSrc > 0) ? _children[childIdSrc - 1].stdio[childFdSrc] : childFdSrc;
 
-    if (childIdSrc >0)
+    if (childIdSrc > 0)
     {
-      ChildStub& child = _children[childIdSrc -1];
-      FDSet& fwdset = (childFdSrc==STDOUT_FILENO) ? child.fwdStdout : child.fwdStderr;
+      ChildStub &child = _children[childIdSrc - 1];
+      FDSet &fwdset = (childFdSrc == STDOUT_FILENO) ? child.fwdStdout : child.fwdStderr;
       fwdset.insert(destPipe);
     }
-    else if (childFdSrc==STDOUT_FILENO)
+    else if (childFdSrc == STDOUT_FILENO)
       _stdin2fwd.insert(destPipe);
-    else continue;
+    else
+      continue;
 
-    log(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
+    errlog(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
   }
 
   // scan and compress the linkages
@@ -454,9 +386,9 @@ int Xtee::run()
         {
           int c = closePipesToChild(child);
           if (wpid == child.pid)
-            log(LOGF_TRACE, "CH%02u[%s] exited: pid(%d) status(0x%x)", child.idx, child.cmd, child.pid, child.status);
+            errlog(LOGF_TRACE, "CH%02u[%s] exited: pid(%d) status(0x%x)", child.idx, child.cmd, child.pid, child.status);
           else if (c > 0)
-            log(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
+            errlog(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
         }
       }
     }
@@ -502,7 +434,7 @@ int Xtee::run()
     // pa step 5.4  select() dispatching
     if (rc < 0) // select() err, quit
     {
-      log(LOGF_ERROR, "io wait got (%d) error(%d), quiting", rc, errno);
+      errlog(LOGF_ERROR, "io wait got (%d) error(%d), quiting", rc, errno);
       break;
     }
     else if (0 == rc) // timeout
@@ -554,9 +486,81 @@ int Xtee::run()
   } // end of select() loop
 
   // pa step 6. close all pipes that are still openning
-  log(LOGF_TRACE, "end of loop, cleaning up %u child(s)", _children.size());
+  errlog(LOGF_TRACE, "end of loop, cleaning up %u child(s)", _children.size());
   for (size_t i = 0; i < _children.size(); i++)
     closePipesToChild(_children[i]);
 
   return 0;
+}
+
+bool Xtee::link(int fdIn, int fdTo)
+{
+  if (fdIn < 0 || fdTo < 0)
+    return false;
+
+  FDIndex::iterator itIdx = _forwards.find(fdIn);
+  if (_forwards.end() == itIdx)
+  {
+    _forwards.insert(FDIndex::value_type(fdIn, FDSet()));
+    itIdx = _forwards.find(fdIn);
+  }
+
+  itIdx->second.insert(fdTo);
+
+  itIdx = _fd2src.find(fdTo);
+  if (_fd2src.end() == itIdx)
+  {
+    _fd2src.insert(FDIndex::value_type(fdTo, FDSet()));
+    itIdx = _fd2src.find(fdTo);
+  }
+
+  itIdx->second.insert(fdIn);
+
+  return true;
+}
+
+void Xtee::unlink(int fdIn, int fdTo)
+{
+  FDIndex::iterator itIdx = _forwards.find(fdIn);
+  if (_forwards.end() != itIdx)
+    itIdx->second.erase(fdTo);
+
+  if (_fd2src.end() != (itIdx = _fd2src.find(fdTo)))
+    itIdx->second.erase(fdIn);
+}
+
+std::string Xtee::unlinksrc(int fdSrc)
+{
+  std::string batch;
+
+  FDIndex::iterator itFwd = _forwards.find(fdSrc);
+  if (_forwards.end() == itIdx)
+    return batch;
+
+  FDSet &fwdSet = itFwd->second;
+  batch += "["
+
+  for (FDSet::iterator itTo = fwdSet.begin(); itTo != fwdSet.end(); itTo++)
+  {
+    int fdDest = *itTo;
+    FDIndex::iterator itSrc = _fd2src.find(fdDest);
+    if (_fd2src.end() != itSrc)
+    {
+      itIdx->second.erase(fdDest);
+      if (itIdx->second.empty())
+      {
+        // the fdDest has no more source left, close it and clean
+        ::fsync(fdDest);
+        ::close(fdDest);
+        _fd2src.erase(fdDest);
+        batch += fdstr(fdDest) + ",";
+      }
+    }
+  }
+
+  ::fsync(fdSrc);
+  ::close(fdSrc);
+  _forwards.erase(fdSrc);
+  batch = fdstr(fdSrc) + "->" + batch +"]";
+  return batch;
 }

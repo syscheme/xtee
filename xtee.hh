@@ -9,15 +9,8 @@
 
 extern "C"
 {
-    #include <unistd.h>
-    #include <sys/wait.h>
-    #include <stdio.h>
-    #include <stdlib.h>
-    #include <string.h>
-    #include <fcntl.h>
-    #include <stdarg.h>
-    #include <errno.h>
-    #include <sys/time.h>
+#include <stdio.h>
+#include <stdlib.h>
 }
 
 #define EOL "\r\n"
@@ -58,13 +51,14 @@ protected:
   typedef int Pipe[2];
   typedef Pipe StdioPipes[3];
   typedef std::set<int> FDSet;
+  typedef std::map<int, FDSet> FDIndex;
 
   typedef struct _ChildStub
   {
     int  idx;
     char *cmd;
     int stdio[3];
-    FDSet fwdStdout, fwdStderr;
+    // FDSet fwdStdout, fwdStderr;
     int pid;
     int status;
   } ChildStub;
@@ -72,10 +66,15 @@ protected:
   typedef std::vector<ChildStub> Children;
   Children _children;
   FDSet _stdin2fwd;
-  typedef std::map<int, FDSet> ForwardMap;
 
-  int     log(unsigned int category, const char *fmt, ...);
-  ssize_t procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd, int childIdx = -1);
+  FDIndex _forwards;
+  FDIndex _fd2src;
+
+  bool    link(int fdIn, int fdTo);
+  void    unlink(int fdIn, int fdTo);
+  int     unlinksrc(int fdSrc);
+  int     errlog(unsigned int category, const char *fmt, ...);
+  int     procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd, int childIdx = -1);
   int     closePipesToChild(ChildStub &child);
 
   bool _bQuit = false;
