@@ -1,4 +1,10 @@
 #include "xtee.hh"
+extern "C"
+{
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+}
 
 // -----------------------------
 // usage()

@@ -67,19 +67,23 @@ protected:
   Children _children;
   FDSet _stdin2fwd;
 
-  FDIndex _forwards;
+  FDIndex _fd2fwd;
   FDIndex _fd2src;
 
   bool    link(int fdIn, int fdTo);
   void    unlink(int fdIn, int fdTo);
-  int     unlinksrc(int fdSrc);
+  std::string unlinkBySrc(int fdSrc);
+  std::string unlinkByDest(int fdDest);
   int     errlog(unsigned int category, const char *fmt, ...);
-  int     procfd(int &fd, fd_set &fdread, fd_set &fderr, const FDSet &fwdset, int defaultfd, int childIdx = -1);
+  int     procfd(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int childIdx = -1);
   int     closePipesToChild(ChildStub &child);
 
   bool _bQuit = false;
   typedef std::vector<char *> Strings;
   Strings _childCommands, _fdLinks;
+
+private:
+  static std::string _unlink(int fdBy, Xtee::FDIndex &lookup, Xtee::FDIndex &reverseLookup);
 };
 
 #endif // __XTEE_HH__
