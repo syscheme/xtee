@@ -29,21 +29,24 @@ public:
   {
     bool noOutFile;
     bool append;
-    long bitrate;
+    long kbps;
     long bytesToSkip;
-    int secsToSkip;
-    int secsDuration;
-    int secsTimeout;
+    int  secsToSkip;
+    int  secsDuration;
+    int  secsTimeout;
     unsigned int logflags;
   } Options;
 
   Xtee();
   virtual ~Xtee() {}
 
+  bool init();
   int run();
 
   int pushCommand(char* cmd);
   int pushLink(char* link);
+
+  void printLinks();
 
   Options _options;
 
@@ -72,14 +75,14 @@ protected:
 
   bool    link(int fdIn, int fdTo);
   void    unlink(int fdIn, int fdTo);
-  std::string unlinkBySrc(int fdSrc);
-  std::string unlinkByDest(int fdDest);
+  std::string closeSrcFd(int& fdSrc);
+  std::string closeDestFd(int& fdDest);
   int     errlog(unsigned int category, const char *fmt, ...);
   
   //@return bytes read from the fd, -1 if error occured at reading
-  int     checkAndForward(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int childIdx = -1);
-  int     closePipesToChild(ChildStub &child);
-  int     QoS(uint nbytesNewRead);
+  int     checkAndForward(int &fd, int defaultfd, int childIdx = -1);
+  void    closePipesToChild(ChildStub &child);
+  int     stdinQoS();
 
   bool _bQuit = false;
   typedef std::vector<char *> Strings;
@@ -87,6 +90,12 @@ protected:
 
 private:
   static std::string _unlink(int fdBy, Xtee::FDIndex &lookup, Xtee::FDIndex &reverseLookup);
+
+  fd_set _fdsetRead, _fdsetErr;
+
+  int64_t _offsetOrigin, _offsetLast;
+  int64_t _stampStart, _stampLast;
+  int _kBpsLimit, _lastv;
 };
 
 #endif // __XTEE_HH__

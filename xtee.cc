@@ -56,7 +56,7 @@ int Xtee::errlog(unsigned int category, const char *fmt, ...)
   return ::write(STDERR_FILENO, msg, nCount);
 }
 
-static long long now()
+static int64_t now()
 {
   struct timeval tmval;
   if (0 != gettimeofday(&tmval, (struct timezone *)NULL))
@@ -66,15 +66,25 @@ static long long now()
 }
 
 Xtee::Xtee()
-    : _options({.noOutFile = false,
+    : _stampStart(0), _stampLast(0), _offsetOrigin(0), _offsetLast(0), _lastv(0), _kBpsLimit(0),
+    _options({.noOutFile = false,
                 .append = false,
-                .bitrate = -1,
+                .kbps = -1,
                 .bytesToSkip = -1,
                 .secsToSkip = -1,
                 .secsDuration = -1,
                 .secsTimeout = -1,
                 .logflags = 0xff})
 {
+}
+
+bool Xtee::init()
+{
+  if (_options.secsToSkip >0)
+    _stampStart = _options.secsToSkip *1000 + now();
+
+  if (_options.kbps >0)
+    _kBpsLimit = _options.kbps >>3;
 }
 
 int Xtee::pushCommand(char *cmd)
@@ -93,16 +103,16 @@ int Xtee::pushLink(char *link)
   return _fdLinks.size();
 }
 
+static char buf[1024] = {0};
 // -----------------------------
 // checkAndForward()
 // -----------------------------
-char buf[1024] = {0};
 //@return bytes read from the fd, -1 if error occured at reading
-int Xtee::checkAndForward(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int childIdx)
+int Xtee::checkAndForward(int &fd, int defaultfd, int childIdx)
 {
   int n = 0;
 
-  if (IS_VALID_FLAG_SET(fd, fdread) && (n = ::read(fd, buf, sizeof(buf))) > 0)
+  if (IS_VALID_FLAG_SET(fd, _fdsetRead) && (n = ::read(fd, buf, sizeof(buf))) > 0)
   {
     FDIndex::iterator itIdx = _fd2fwd.find(fd);
     if (_fd2fwd.end() == itIdx) // if (fwdset.empty())
@@ -130,7 +140,7 @@ int Xtee::checkAndForward(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd,
     }
   }
 
-  if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, fderr))
+  if (fd > STDERR_FILENO && IS_VALID_FLAG_SET(fd, _fdsetErr))
   {
     errlog(LOGF_TRACE, "CH%02u[%s] closing error fd(%d)", childIdx, fd);
     ::close(fd);
@@ -142,11 +152,98 @@ int Xtee::checkAndForward(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd,
 }
 
 // -----------------------------
+// stdinQoS()
+// -----------------------------
+int Xtee::stdinQoS()
+{
+  if (!IS_VALID_FLAG_SET(STDIN_FILENO, _fdsetRead))
+    return 0;
+
+  int n = ::read(STDIN_FILENO, buf, sizeof(buf));
+  if (n <= 0)
+    return n;
+
+  int64_t stampNow = now();
+
+  // yield if stamp start is defined and not meet
+  if (_stampStart >0 && _stampStart > stampNow)
+    return n;
+  if (_stampStart<=0)
+    _stampStart = stampNow;
+
+  if (_options.secsDuration >0 && stampNow >(_stampStart + _options.secsDuration *1000))
+    _bQuit = true;
+
+  char * p = buf;
+  
+  // yield if the leading yield bytes is specified
+  if (_options.bytesToSkip >0)
+  {
+    if ((_offsetOrigin +n) <= _options.bytesToSkip)
+      return n;
+  
+    if (_offsetOrigin <_options.bytesToSkip)
+    {
+      uint bytesToSkip = _options.bytesToSkip - _offsetOrigin;
+      p += bytesToSkip;
+      n -= bytesToSkip;
+    }
+  }
+
+  _offsetOrigin += n;
+
+  // forward the data
+  FDIndex::iterator itIdx = _fd2fwd.find(STDIN_FILENO);
+  if (_fd2fwd.end() == itIdx) // if (fwdset.empty())
+    ::write(STDOUT_FILENO, p, n);
+  else
+  {
+    FDSet &fwdset = itIdx->second;
+    for (FDSet::const_iterator it = fwdset.begin(); it != fwdset.end(); it++)
+    {
+      if (*it > 0)
+        ::write(*it, p, n);
+    }
+  }
+
+  // limit the speed
+  if (_options.kbps > 0)
+  {
+    stampNow = now();
+    if (_stampLast <= 0)
+    {
+      _stampLast = stampNow;
+      _offsetLast = _offsetOrigin;
+    }
+
+    int elapsed = stampNow - _stampLast;
+    int msecYield =0;
+    if(_kBpsLimit > 0 && elapsed > 300)
+    {
+      int msecP = (_offsetOrigin - _offsetLast) / _kBpsLimit - elapsed;
+      int msecI = (_offsetOrigin - _options.bytesToSkip) / _kBpsLimit - (stampNow - _stampStart);
+      int v = (_offsetOrigin - _offsetLast) / elapsed;
+      int msecV = (v > _lastv) ? 1 : -1;
+
+      msecYield = msecP + (msecI / 4) + msecV;
+      
+      _lastv = v;
+      _stampLast = stampNow;
+    }
+
+    if (msecYield > 0)
+      ::usleep(msecYield * 1000);
+  }
+
+  return n;
+}
+
+// -----------------------------
 // closePipesToChild()
 // -----------------------------
-int Xtee::closePipesToChild(ChildStub &child)
+void Xtee::closePipesToChild(ChildStub &child)
 {
-  int nClosed = 0;
+  // int nClosed = 0;
   // for (int j = 0; j < 3; j++)
   // {
   //   int &fd = child.stdio[j];
@@ -175,15 +272,19 @@ int Xtee::closePipesToChild(ChildStub &child)
 
   // child.fwdStderr.clear();
 
-  std::string batch = unlinkBySrc(CHILDOUT(child)); // STDOUT of the chhild
-  batch            += unlinkBySrc(CHILDERR(child)); // STDERR of the chhild
-  batch            += unlinkByDest(CHILDIN(child)); // STDIN of the chhild
+  std::string batch;
 
+  if (CHILDIN(child) > STDERR_FILENO)
+    batch += closeDestFd(CHILDIN(child)) + ","; // STDIN of the chhild
 
-  if (nClosed > 0)
-    errlog(LOGF_TRACE, "closed %d link(s) to C%02d[%s]", nClosed, child.idx, child.cmd);
+  if (CHILDOUT(child) > STDERR_FILENO)
+    batch += closeSrcFd(CHILDOUT(child)) + ","; // STDOUT of the chhild
 
-  return nClosed;
+  if (CHILDERR(child) > STDERR_FILENO)
+    batch += closeSrcFd(CHILDERR(child)); // STDERR of the chhild
+
+  errlog(LOGF_TRACE, "closed link(s) to C%02d[%s]: %s", child.idx, child.cmd, batch.c_str());
+  // return nClosed;
 }
 
 // -----------------------------
@@ -343,32 +444,44 @@ int Xtee::run()
     errlog(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
   }
 
-  // scan and compress the linkages
-  // for (size_t i = 0; false && i < _children.size(); i++) // -- disabled
-  // {
-  //   ChildStub &child = _children[i];
-  //   if (child.fwdStdout.size() == 1)
-  //   {
-  //     // directly connect the link
-  //     int dest = (*child.fwdStdout.begin());
-  //     if (dest > STDERR_FILENO)
-  //     {
-  //       ::dup2(CHILDOUT(child), dest);
-  //       ::close(CHILDOUT(child));
-  //       CHILDOUT(child) = -1;
-  //     }
-  //   }
+  // scan and fulfill the orphan pipes to the parent
+  for (size_t i = 0; i < _children.size(); i++) // -- disabled
+  {
+    ChildStub &child = _children[i];
 
-  //   if (child.fwdStderr.size() == 1)
+    // link the undefine pipes to the parent
+    if (_fd2src.end() == _fd2src.find(CHILDIN(child)))
+    {
+      link(STDIN_FILENO, CHILDIN(child));
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:IN <- PA:IN", CHILDIN(child), i+1);
+    }
+
+    if (_fd2fwd.end() == _fd2fwd.find(CHILDOUT(child)))
+    {
+      link(CHILDOUT(child), STDOUT_FILENO);
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:OUT -> PA:OUT", CHILDOUT(child), i+1);
+    }
+
+    if (_fd2fwd.end() == _fd2fwd.find(CHILDERR(child)))
+    {
+      link(CHILDERR(child), STDERR_FILENO);
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:ERR -> PA:OUT", CHILDERR(child), i+1);
+    }
+  }
+
+  // scan and compress the linkages
+  // for (FDIndex::iterator it = _fd2fwd.begin(); it != _fd2fwd.end(); it++)
+  // {
+  //   if (it->second.size() != 1)
+  //     continue;
+
+  //   int dest = (*it->second.begin());
+  //   if (dest > STDERR_FILENO)
   //   {
-  //     // directly connect the link
-  //     int dest = (*child.fwdStderr.begin());
-  //     if (dest > STDERR_FILENO)
-  //     {
-  //       ::dup2(CHILDERR(child), dest);
-  //       ::close(CHILDERR(child));
-  //       CHILDERR(child) = -1;
-  //     }
+  //     ::dup2(it->first, dest);
+  //     src2del.push_back(it->first);
+  //     ::close(it->first);
+  //     // NOT GOOD
   //   }
   // }
 
@@ -376,6 +489,7 @@ int Xtee::run()
   int maxTimeouts = _options.secsTimeout * 1000 / CHECK_INTERVAL;
   bool bChildCheckNeeded = false;
   int nIdles = 0;
+  int cLiveChildren =0;
 
   for (int timeouts = 0; !_bQuit && (maxTimeouts < 0 || timeouts < maxTimeouts);)
   {
@@ -389,35 +503,35 @@ int Xtee::run()
         pid_t wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
         if (wpid != 0)                                                       // WNOHANG returns 0 when child is still running
         {
-          int c = closePipesToChild(child);
+          closePipesToChild(child);
           if (wpid == child.pid)
             errlog(LOGF_TRACE, "CH%02u[%s] exited: pid(%d) status(0x%x)", child.idx, child.cmd, child.pid, child.status);
-          else if (c > 0)
-            errlog(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
+          else errlog(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
         }
+        else cLiveChildren++;
       }
     }
+
+    // if (cLiveChildren <= 0)
+    //   _bQuit = true;
 
     // pa step 5.2 prepare fdset for select()
     int bytesChildrenIO = 0;
 
-    fd_set fdread, fderr;
-    FD_ZERO(&fdread);
-    FD_ZERO(&fderr);
+    fd_set _fdsetRead, _fdsetErr;
+    FD_ZERO(&_fdsetRead);
+    FD_ZERO(&_fdsetErr);
 
     int maxfd = -1;
-    SET_VALID_FD_IN(STDIN_FILENO, fdread, maxfd); // the STDIN of the parent process
-
-    for (size_t i = 0; i < _children.size(); i++)
+    for (FDIndex::iterator it = _fd2fwd.begin(); it != _fd2fwd.end(); it++)
     {
-      ChildStub &child = _children[i];
-      int fd = CHILDOUT(child);
-      SET_VALID_FD_IN(fd, fdread, maxfd);
-      SET_VALID_FD_IN(fd, fderr, maxfd);
+      if (it->first < 0)
+        continue;
 
-      fd = CHILDERR(child);
-      SET_VALID_FD_IN(fd, fdread, maxfd);
-      SET_VALID_FD_IN(fd, fderr, maxfd);
+      FD_SET(it->first, &_fdsetRead);
+      FD_SET(it->first, &_fdsetErr);
+      if (maxfd < it->first)
+        maxfd = it->first;
     }
 
     if (maxfd <= STDERR_FILENO && _children.size() > 0)
@@ -432,7 +546,7 @@ int Xtee::run()
     timeout.tv_sec = CHECK_INTERVAL / 1000;
     timeout.tv_usec = (CHECK_INTERVAL % 1000) * 1000;
 
-    int rc = select(maxfd + 1, &fdread, NULL, &fderr, &timeout);
+    int rc = select(maxfd + 1, &_fdsetRead, NULL, &_fdsetErr, &timeout);
     if (_bQuit)
       break;
 
@@ -450,15 +564,15 @@ int Xtee::run()
     }
 
     // pa step 5.5 about this stdin
-    {
-      ssize_t n = checkAndForward(STDIN_FILENO, fdread, fderr, STDOUT_FILENO);
+    stdinQoS();
+    // {
+    //   checkAndForward(STDIN_FILENO, STDOUT_FILENO);
 
-      if (n <= 0 && _children.empty())
-        break;
+    //   if(cLiveChildren<=0)
+    //     break;
 
-      if (n > 0)
-        QoS((uint)n);
-    }
+    //   QoS((uint)n);
+    // }
 
     // pa step 5.6 scan if any child has IO occured
     for (size_t i = 0; !_bQuit && i < _children.size(); i++)
@@ -467,7 +581,7 @@ int Xtee::run()
       ssize_t n = 0;
 
       // about the child's stdout
-      n = checkAndForward(CHILDOUT(child), fdread, fderr, STDOUT_FILENO, child.idx);
+      n = checkAndForward(CHILDOUT(child), STDOUT_FILENO, child.idx);
 
       if (n < 0)
         bChildCheckNeeded = true;
@@ -475,7 +589,7 @@ int Xtee::run()
         bytesChildrenIO += n;
 
       // about the child's stderr
-      n = checkAndForward(CHILDERR(child), fdread, fderr, STDERR_FILENO, child.idx);
+      n = checkAndForward(CHILDERR(child), STDERR_FILENO, child.idx);
       if (n < 0)
         bChildCheckNeeded = true;
       else
@@ -517,7 +631,6 @@ bool Xtee::link(int fdIn, int fdTo)
   }
 
   itIdx->second.insert(fdIn);
-
   return true;
 }
 
@@ -538,6 +651,25 @@ static std::string fd2str(int fd)
   return buf;
 }
 
+void Xtee::printLinks()
+{
+  std::string result;
+  result.reserve(200);
+  for (FDIndex::iterator it = _fd2fwd.begin(); it != _fd2fwd.end(); it++)
+  {
+    std::string to;
+    for (FDSet::iterator itSet = it->second.begin(); itSet != it->second.end(); itSet++)
+      to += fd2str(*itSet)+ ",";
+
+    if (!to.empty())
+      to.erase(to.length() - 1); // erase the last comma
+    
+    result += fd2str(it->first) + "->[" +to +"];";
+  }
+
+  errlog(LOGF_TRACE, "links: ", result.c_str());
+}
+
 std::string Xtee::_unlink(int fdBy, Xtee::FDIndex& lookup, Xtee::FDIndex& reverseLookup)
 {
   std::string batch;
@@ -550,40 +682,45 @@ std::string Xtee::_unlink(int fdBy, Xtee::FDIndex& lookup, Xtee::FDIndex& revers
   {
     int fdLinked = *itInFound;
     FDIndex::iterator itReversed = reverseLookup.find(fdLinked);
-    if (reverseLookup.end() != itReversed)
+    if (reverseLookup.end() == itReversed)
+      continue; // not found
+
+    itReversed->second.erase(fdBy);
+    if (itReversed->second.empty())
     {
-      itReversed->second.erase(fdBy);
-      if (itReversed->second.empty())
-      {
-        // the fdLinked has no more links left, close it and clean
-        ::fsync(fdLinked);
-        ::close(fdLinked);
-        reverseLookup.erase(fdLinked);
-        batch += fd2str(fdLinked) + ",";
-      }
+      // the fdLinked has no more links left, close it and clean
+      ::fsync(fdLinked);
+      ::close(fdLinked);
+      reverseLookup.erase(fdLinked);
+      batch += fd2str(fdLinked) + ",";
     }
   }
 
-  ::fsync(fdBy);
-  ::close(fdBy);
+  if (!batch.empty())
+    batch.erase(batch.length() -1); // erase the last comma
+
   lookup.erase(fdBy);
   return batch;
 }
 
-std::string Xtee::unlinkBySrc(int fdSrc)
+std::string Xtee::closeSrcFd(int& fdSrc)
 {
-  std::string batch = _unlink(fdSrc, _fd2fwd, _fd2src);
-  return batch.empty() ? "" : fd2str(fdSrc) + "->[" + batch +"]";
+  std::string batch = fd2str(fdSrc) + "->[" + _unlink(fdSrc, _fd2fwd, _fd2src) +"]";
+
+  ::fsync(fdSrc);
+  ::close(fdSrc);
+  fdSrc =-1;
+
+  return batch;
 }
 
-std::string Xtee::unlinkByDest(int fdDest)
+std::string Xtee::closeDestFd(int& fdDest)
 {
-  std::string batch = _unlink(fdDest, _fd2src, _fd2fwd);
-  return batch.empty() ? "" : fd2str(fdDest) + "<-[" + batch +"]";
+  std::string batch = fd2str(fdDest) + "<-[" + _unlink(fdDest, _fd2src, _fd2fwd) +"]";
+  ::fsync(fdDest);
+  ::close(fdDest);
+  fdDest =-1;
+
+  return batch;
 }
 
-int Xtee::QoS(uint nbytesNewRead)
-{
-  // TODO: bitrate control
-  return 0;
-}

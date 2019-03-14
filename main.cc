@@ -17,7 +17,7 @@ void usage()
             << "  -v <level>           verbose level, default 4 to output progress onto stderr" EOL
             << "  -a                   append to the output file" EOL
             << "  -n                   no output file other than stdout" EOL
-            << "  -s <bps>             limits the transfer bitrate at reading from stdin in bps" EOL
+            << "  -s <kbps>            limits the transfer bitrate at reading from stdin in kbps" EOL
             << "  -k <bytes>           skips a certain amount of bytes at the beginning of reading from stdin" EOL
             << "  -t <secs>            skips the given seconds of data at reading from stdin" EOL
             << "  -d <secs>            duration in seconds to run" EOL
@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
       break;
 
     case 's':
-      xtee._options.bitrate = atol(optarg);
+      xtee._options.kbps = atol(optarg);
       break;
 
     case 'k':
@@ -103,5 +103,5 @@ int main(int argc, char *argv[])
     }
   }
 
-  return xtee.run();
+  return xtee.init() ? xtee.run() :-100;
 }
