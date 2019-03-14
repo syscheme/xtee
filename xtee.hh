@@ -77,7 +77,7 @@ protected:
   void    unlink(int fdIn, int fdTo);
   std::string closeSrcFd(int& fdSrc);
   std::string closeDestFd(int& fdDest);
-  int     errlog(unsigned int category, const char *fmt, ...);
+  int     errlog(unsigned short category, const char *fmt, ...);
   
   //@return bytes read from the fd, -1 if error occured at reading
   int     checkAndForward(int &fd, int defaultfd, int childIdx = -1);

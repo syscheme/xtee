@@ -34,26 +34,21 @@ extern "C"
 // errlog()
 // -----------------------------
 #define LOG_LINE_MAX_BUF (256)
-int Xtee::errlog(unsigned int category, const char *fmt, ...)
+int Xtee::errlog(unsigned short category, const char *fmt, ...)
 {
   if (0 == (_options.logflags & category))
     return 0;
 
-  char msg[LOG_LINE_MAX_BUF];
+  char msg[LOG_LINE_MAX_BUF] ="", *p=msg;
+  p += snprintf(p, LOG_LINE_MAX_BUF -20, "\nxtee[%02x]:", category);
   va_list args;
 
   va_start(args, fmt);
-  int nCount = ::vsnprintf(msg, LOG_LINE_MAX_BUF - 8, fmt, args);
+  p += ::vsnprintf(p, msg + LOG_LINE_MAX_BUF - p -8, fmt, args);
   va_end(args);
-  msg[LOG_LINE_MAX_BUF - 8] = '\0';
+  *p++ = '\r';  *p++ = '\n';  *p++ = '\0';
 
-  if (nCount < 0)
-    nCount = 0;
-
-  msg[nCount++] = '\r';
-  msg[nCount++] = '\n';
-  msg[nCount++] = '\0';
-  return ::write(STDERR_FILENO, msg, nCount);
+  return ::write(STDERR_FILENO, msg, p-msg);
 }
 
 static int64_t now()
