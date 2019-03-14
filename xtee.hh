@@ -75,8 +75,11 @@ protected:
   std::string unlinkBySrc(int fdSrc);
   std::string unlinkByDest(int fdDest);
   int     errlog(unsigned int category, const char *fmt, ...);
-  int     procfd(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int childIdx = -1);
+  
+  //@return bytes read from the fd, -1 if error occured at reading
+  int     checkAndForward(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int childIdx = -1);
   int     closePipesToChild(ChildStub &child);
+  int     QoS(uint nbytesNewRead);
 
   bool _bQuit = false;
   typedef std::vector<char *> Strings;

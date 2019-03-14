@@ -94,10 +94,11 @@ int Xtee::pushLink(char *link)
 }
 
 // -----------------------------
-// procfd()
+// checkAndForward()
 // -----------------------------
 char buf[1024] = {0};
-int Xtee::procfd(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int childIdx)
+//@return bytes read from the fd, -1 if error occured at reading
+int Xtee::checkAndForward(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int childIdx)
 {
   int n = 0;
 
@@ -450,16 +451,13 @@ int Xtee::run()
 
     // pa step 5.5 about this stdin
     {
-      int fdStdin = STDIN_FILENO;
-      ssize_t n = procfd(fdStdin, fdread, fderr, STDOUT_FILENO);
+      ssize_t n = checkAndForward(STDIN_FILENO, fdread, fderr, STDOUT_FILENO);
 
       if (n <= 0 && _children.empty())
         break;
 
       if (n > 0)
-      {
-        // TODO: bitrate control
-      }
+        QoS((uint)n);
     }
 
     // pa step 5.6 scan if any child has IO occured
@@ -469,7 +467,7 @@ int Xtee::run()
       ssize_t n = 0;
 
       // about the child's stdout
-      n = procfd(CHILDOUT(child), fdread, fderr, STDOUT_FILENO, child.idx);
+      n = checkAndForward(CHILDOUT(child), fdread, fderr, STDOUT_FILENO, child.idx);
 
       if (n < 0)
         bChildCheckNeeded = true;
@@ -477,7 +475,7 @@ int Xtee::run()
         bytesChildrenIO += n;
 
       // about the child's stderr
-      n = procfd(CHILDERR(child), fdread, fderr, STDERR_FILENO, child.idx);
+      n = checkAndForward(CHILDERR(child), fdread, fderr, STDERR_FILENO, child.idx);
       if (n < 0)
         bChildCheckNeeded = true;
       else
@@ -582,4 +580,10 @@ std::string Xtee::unlinkByDest(int fdDest)
 {
   std::string batch = _unlink(fdDest, _fd2src, _fd2fwd);
   return batch.empty() ? "" : fd2str(fdDest) + "<-[" + batch +"]";
+}
+
+int Xtee::QoS(uint nbytesNewRead)
+{
+  // TODO: bitrate control
+  return 0;
 }
