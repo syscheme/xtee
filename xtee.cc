@@ -346,32 +346,44 @@ int Xtee::run()
     errlog(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
   }
 
-  // scan and compress the linkages
-  // for (size_t i = 0; false && i < _children.size(); i++) // -- disabled
-  // {
-  //   ChildStub &child = _children[i];
-  //   if (child.fwdStdout.size() == 1)
-  //   {
-  //     // directly connect the link
-  //     int dest = (*child.fwdStdout.begin());
-  //     if (dest > STDERR_FILENO)
-  //     {
-  //       ::dup2(CHILDOUT(child), dest);
-  //       ::close(CHILDOUT(child));
-  //       CHILDOUT(child) = -1;
-  //     }
-  //   }
+  // scan and fulfill the orphan pipes to the parent
+  for (size_t i = 0; i < _children.size(); i++) // -- disabled
+  {
+    ChildStub &child = _children[i];
 
-  //   if (child.fwdStderr.size() == 1)
+    // link the undefine pipes to the parent
+    if (_fd2src.end() == _fd2src.find(CHILDIN(child)))
+    {
+      link(STDIN_FILENO, CHILDIN(child));
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:IN <- PA:IN", CHILDIN(child), i+1);
+    }
+
+    if (_fd2fwd.end() == _fd2fwd.find(CHILDOUT(child)))
+    {
+      link(CHILDOUT(child), STDOUT_FILENO);
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:OUT -> PA:OUT", CHILDOUT(child), i+1);
+    }
+
+    if (_fd2fwd.end() == _fd2fwd.find(CHILDERR(child)))
+    {
+      link(CHILDERR(child), STDERR_FILENO);
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:ERR -> PA:OUT", CHILDERR(child), i+1);
+    }
+  }
+
+  // scan and compress the linkages
+  // for (FDIndex::iterator it = _fd2fwd.begin(); it != _fd2fwd.end(); it++)
+  // {
+  //   if (it->second.size() != 1)
+  //     continue;
+
+  //   int dest = (*it->second.begin());
+  //   if (dest > STDERR_FILENO)
   //   {
-  //     // directly connect the link
-  //     int dest = (*child.fwdStderr.begin());
-  //     if (dest > STDERR_FILENO)
-  //     {
-  //       ::dup2(CHILDERR(child), dest);
-  //       ::close(CHILDERR(child));
-  //       CHILDERR(child) = -1;
-  //     }
+  //     ::dup2(it->first, dest);
+  //     src2del.push_back(it->first);
+  //     ::close(it->first);
+  //     // NOT GOOD
   //   }
   // }
 
@@ -408,18 +420,15 @@ int Xtee::run()
     FD_ZERO(&fderr);
 
     int maxfd = -1;
-    SET_VALID_FD_IN(STDIN_FILENO, fdread, maxfd); // the STDIN of the parent process
-
-    for (size_t i = 0; i < _children.size(); i++)
+    for (FDIndex::iterator it = _fd2fwd.begin(); it != _fd2fwd.end(); it++)
     {
-      ChildStub &child = _children[i];
-      int fd = CHILDOUT(child);
-      SET_VALID_FD_IN(fd, fdread, maxfd);
-      SET_VALID_FD_IN(fd, fderr, maxfd);
+      if (it->first < 0)
+        continue;
 
-      fd = CHILDERR(child);
-      SET_VALID_FD_IN(fd, fdread, maxfd);
-      SET_VALID_FD_IN(fd, fderr, maxfd);
+      FD_SET(it->first, &fdread);
+      FD_SET(it->first, &fderr);
+      if (maxfd < it->first)
+        maxfd = it->first;
     }
 
     if (maxfd <= STDERR_FILENO && _children.size() > 0)
@@ -522,7 +531,6 @@ bool Xtee::link(int fdIn, int fdTo)
   }
 
   itIdx->second.insert(fdIn);
-
   return true;
 }
 
@@ -543,6 +551,25 @@ static std::string fd2str(int fd)
   return buf;
 }
 
+void Xtee::printLinks()
+{
+  std::string result;
+  result.reserve(200);
+  for (FDIndex::iterator it = _fd2fwd.begin(); it != _fd2fwd.end(); it++)
+  {
+    std::string to;
+    for (FDSet::iterator itSet = it->second.begin(); itSet != it->second.end(); itSet++)
+      to += fd2str(*itSet)+ ",";
+
+    if (!to.empty())
+      to.erase(to.length() - 1); // erase the last comma
+    
+    result += fd2str(it->first) + "->[" +to +"];";
+  }
+
+  errlog(LOGF_TRACE, "links: ", result.c_str());
+}
+
 std::string Xtee::_unlink(int fdBy, Xtee::FDIndex& lookup, Xtee::FDIndex& reverseLookup)
 {
   std::string batch;
@@ -555,17 +582,17 @@ std::string Xtee::_unlink(int fdBy, Xtee::FDIndex& lookup, Xtee::FDIndex& revers
   {
     int fdLinked = *itInFound;
     FDIndex::iterator itReversed = reverseLookup.find(fdLinked);
-    if (reverseLookup.end() != itReversed)
+    if (reverseLookup.end() == itReversed)
+      continue; // not found
+
+    itReversed->second.erase(fdBy);
+    if (itReversed->second.empty())
     {
-      itReversed->second.erase(fdBy);
-      if (itReversed->second.empty())
-      {
-        // the fdLinked has no more links left, close it and clean
-        ::fsync(fdLinked);
-        ::close(fdLinked);
-        reverseLookup.erase(fdLinked);
-        batch += fd2str(fdLinked) + ",";
-      }
+      // the fdLinked has no more links left, close it and clean
+      ::fsync(fdLinked);
+      ::close(fdLinked);
+      reverseLookup.erase(fdLinked);
+      batch += fd2str(fdLinked) + ",";
     }
   }
 

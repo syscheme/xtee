@@ -45,6 +45,8 @@ public:
   int pushCommand(char* cmd);
   int pushLink(char* link);
 
+  void printLinks();
+
   Options _options;
 
 protected:
