@@ -143,9 +143,9 @@ int Xtee::procfd(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int chil
 // -----------------------------
 // closePipesToChild()
 // -----------------------------
-int Xtee::closePipesToChild(ChildStub &child)
+void Xtee::closePipesToChild(ChildStub &child)
 {
-  int nClosed = 0;
+  // int nClosed = 0;
   // for (int j = 0; j < 3; j++)
   // {
   //   int &fd = child.stdio[j];
@@ -174,15 +174,19 @@ int Xtee::closePipesToChild(ChildStub &child)
 
   // child.fwdStderr.clear();
 
-  std::string batch = unlinkBySrc(CHILDOUT(child)); // STDOUT of the chhild
-  batch            += unlinkBySrc(CHILDERR(child)); // STDERR of the chhild
-  batch            += unlinkByDest(CHILDIN(child)); // STDIN of the chhild
+  std::string batch;
 
+  if (CHILDIN(child) > STDERR_FILENO)
+    batch += closeDestFd(CHILDIN(child)) + ","; // STDIN of the chhild
 
-  if (nClosed > 0)
-    errlog(LOGF_TRACE, "closed %d link(s) to C%02d[%s]", nClosed, child.idx, child.cmd);
+  if (CHILDOUT(child) > STDERR_FILENO)
+    batch += closeSrcFd(CHILDOUT(child)) + ","; // STDOUT of the chhild
 
-  return nClosed;
+  if (CHILDERR(child) > STDERR_FILENO)
+    batch += closeSrcFd(CHILDERR(child)); // STDERR of the chhild
+
+  errlog(LOGF_TRACE, "closed link(s) to C%02d[%s]: %s", child.idx, child.cmd, batch.c_str());
+  // return nClosed;
 }
 
 // -----------------------------
@@ -388,11 +392,10 @@ int Xtee::run()
         pid_t wpid = waitpid(child.pid, &child.status, WNOHANG | WUNTRACED); // instantly return
         if (wpid != 0)                                                       // WNOHANG returns 0 when child is still running
         {
-          int c = closePipesToChild(child);
+          closePipesToChild(child);
           if (wpid == child.pid)
             errlog(LOGF_TRACE, "CH%02u[%s] exited: pid(%d) status(0x%x)", child.idx, child.cmd, child.pid, child.status);
-          else if (c > 0)
-            errlog(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
+          else errlog(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
         }
       }
     }
@@ -566,20 +569,30 @@ std::string Xtee::_unlink(int fdBy, Xtee::FDIndex& lookup, Xtee::FDIndex& revers
     }
   }
 
-  ::fsync(fdBy);
-  ::close(fdBy);
+  if (!batch.empty())
+    batch.erase(batch.length() -1); // erase the last comma
+
   lookup.erase(fdBy);
   return batch;
 }
 
-std::string Xtee::unlinkBySrc(int fdSrc)
+std::string Xtee::closeSrcFd(int& fdSrc)
 {
-  std::string batch = _unlink(fdSrc, _fd2fwd, _fd2src);
-  return batch.empty() ? "" : fd2str(fdSrc) + "->[" + batch +"]";
+  std::string batch = fd2str(fdSrc) + "->[" + _unlink(fdSrc, _fd2fwd, _fd2src) +"]";
+
+  ::fsync(fdSrc);
+  ::close(fdSrc);
+  fdSrc =-1;
+
+  return batch;
 }
 
-std::string Xtee::unlinkByDest(int fdDest)
+std::string Xtee::closeDestFd(int& fdDest)
 {
-  std::string batch = _unlink(fdDest, _fd2src, _fd2fwd);
-  return batch.empty() ? "" : fd2str(fdDest) + "<-[" + batch +"]";
+  std::string batch = fd2str(fdDest) + "<-[" + _unlink(fdDest, _fd2src, _fd2fwd) +"]";
+  ::fsync(fdDest);
+  ::close(fdDest);
+  fdDest =-1;
+
+  return batch;
 }

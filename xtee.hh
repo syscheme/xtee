@@ -72,11 +72,11 @@ protected:
 
   bool    link(int fdIn, int fdTo);
   void    unlink(int fdIn, int fdTo);
-  std::string unlinkBySrc(int fdSrc);
-  std::string unlinkByDest(int fdDest);
+  std::string closeSrcFd(int& fdSrc);
+  std::string closeDestFd(int& fdDest);
   int     errlog(unsigned int category, const char *fmt, ...);
   int     procfd(int &fd, fd_set &fdread, fd_set &fderr, int defaultfd, int childIdx = -1);
-  int     closePipesToChild(ChildStub &child);
+  void    closePipesToChild(ChildStub &child);
 
   bool _bQuit = false;
   typedef std::vector<char *> Strings;
