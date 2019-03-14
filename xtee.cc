@@ -391,6 +391,7 @@ int Xtee::run()
   int maxTimeouts = _options.secsTimeout * 1000 / CHECK_INTERVAL;
   bool bChildCheckNeeded = false;
   int nIdles = 0;
+  int cLiveChildren =0;
 
   for (int timeouts = 0; !_bQuit && (maxTimeouts < 0 || timeouts < maxTimeouts);)
   {
@@ -409,8 +410,12 @@ int Xtee::run()
             errlog(LOGF_TRACE, "CH%02u[%s] exited: pid(%d) status(0x%x)", child.idx, child.cmd, child.pid, child.status);
           else errlog(LOGF_TRACE, "CH%02u[%s] gone: pid(%d)", child.idx, child.cmd, child.pid);
         }
+        else cLiveChildren++;
       }
     }
+
+    // if (cLiveChildren <= 0)
+    //   _bQuit = true;
 
     // pa step 5.2 prepare fdset for select()
     int bytesChildrenIO = 0;
