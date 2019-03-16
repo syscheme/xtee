@@ -1,7 +1,6 @@
 #ifndef __XTEE_HH__
 #define __XTEE_HH__
 
-#include <iostream>
 #include <string>
 #include <vector>
 #include <set>
@@ -22,6 +21,11 @@ extern "C"
 // -----------------------------
 // class Xtee
 // -----------------------------
+// an extersion to unix command tee to cover:
+//   - spawn multiple child processes
+//   - link the stdin/stdout/stderr of the children and this xtee
+//   - exchange the stdxx stream among the parties
+//   - QoS control thru xtee's stdin-to-stdout, covers speed control, scheduling, bytes-to-skip, etc.
 class Xtee
 {
 public:
@@ -41,7 +45,8 @@ public:
   virtual ~Xtee() {}
 
   bool init();
-  int run();
+  int  run();
+
   void stop() { _bQuit =true; }
 
   int pushCommand(char* cmd);
@@ -50,9 +55,7 @@ public:
   int  errlog(unsigned short category, const char *fmt, ...);
   void printLinks();
 
-  int lineToArgv(char* argv[], int maxargc, char *line, int linelen);
-
-  Options _options;
+  static int lineToArgv(char* argv[], int maxargc, char *line, int linelen);
 
 protected:
   typedef int Pipe[2];
@@ -96,10 +99,13 @@ private:
 
   fd_set _fdsetRead, _fdsetErr;
 
-  int64_t _offsetOrigin, _offsetLast;
   int64_t _stampStart, _stampLast;
+  int64_t _offsetOrigin, _offsetLast;
   int _kBpsLimit, _lastv;
   int _childsToStdin;
+
+public:
+  Options _options;
 };
 
 #endif // __XTEE_HH__

@@ -15,6 +15,8 @@ extern "C"
 
 #define QoS_MEASURE_INTERVAL_MSEC (1000/QoS_MEASURES_PER_SEC) // msec
 
+#define LOG_LINE_MAX_BUF (256)
+
 #define PSTDIN(_PIO) (_PIO[0])
 #define PSTDOUT(_PIO) (_PIO[1])
 #define PSTDERR(_PIO) (_PIO[2])
@@ -32,26 +34,9 @@ extern "C"
       _MAXFD = _FD;                          \
   }
 
-// -----------------------------
-// errlog()
-// -----------------------------
-#define LOG_LINE_MAX_BUF (256)
-int Xtee::errlog(unsigned short category, const char *fmt, ...)
-{
-  if (0 == (_options.logflags & category))
-    return 0;
-
-  char msg[LOG_LINE_MAX_BUF] ="", *p=msg;
-  p += snprintf(p, LOG_LINE_MAX_BUF -20, "\nxtee[%02x]: ", category);
-  va_list args;
-
-  va_start(args, fmt);
-  p += ::vsnprintf(p, msg + LOG_LINE_MAX_BUF - p -8, fmt, args);
-  va_end(args);
-  *p++ = '\r';  *p++ = '\n';  *p++ = '\0';
-
-  return ::write(STDERR_FILENO, msg, p-msg);
-}
+#ifndef MIN
+#  define MIN(X, Y) (((X)<(Y))?(X):(Y))
+#endif // MIN
 
 static int64_t now()
 {
@@ -62,8 +47,12 @@ static int64_t now()
   return (tmval.tv_sec * 1000LL + tmval.tv_usec / 1000);
 }
 
+// -----------------------------
+// class Xtee
+// -----------------------------
 Xtee::Xtee()
-    : _stampStart(0), _stampLast(0), _offsetOrigin(0), _offsetLast(0), _lastv(0), _kBpsLimit(0), _childsToStdin(0),
+    : _stampStart(0), _stampLast(0), _offsetOrigin(0), _offsetLast(0), 
+    _kBpsLimit(0), _lastv(0), _childsToStdin(0),
     _options({.noOutFile = false,
                 .append = false,
                 .kbps = -1,
@@ -75,6 +64,23 @@ Xtee::Xtee()
 {
 }
 
+int Xtee::errlog(unsigned short category, const char *fmt, ...)
+{
+  if (0 == (_options.logflags & category))
+    return 0;
+
+  char msg[LOG_LINE_MAX_BUF] ="", *p=msg;
+  p += snprintf(p, LOG_LINE_MAX_BUF -20, EOL "xtee[%02x]: ", category);
+  va_list args;
+
+  va_start(args, fmt);
+  p += ::vsnprintf(p, msg + LOG_LINE_MAX_BUF - p -8, fmt, args);
+  va_end(args);
+  *p++ = '\r';  *p++ = '\n';  *p++ = '\0';
+
+  return ::write(STDERR_FILENO, msg, p-msg);
+}
+
 bool Xtee::init()
 {
   if (_options.secsToSkip >0)
@@ -82,6 +88,8 @@ bool Xtee::init()
 
   if (_options.kbps >0)
     _kBpsLimit = _options.kbps >>3;
+
+  return true;
 }
 
 int Xtee::pushCommand(char *cmd)
@@ -101,9 +109,6 @@ int Xtee::pushLink(char *link)
 }
 
 static char buf[1024*4] = {0};
-// -----------------------------
-// checkAndForward()
-// -----------------------------
 //@return bytes read from the fd, -1 if error occured at reading
 int Xtee::checkAndForward(int &fd, int defaultfd, int childIdx)
 {
@@ -166,13 +171,8 @@ int Xtee::checkAndForward(int &fd, int defaultfd, int childIdx)
   return n;
 }
 
-// -----------------------------
 // stdinQoS()
 // -----------------------------
-#ifndef MIN
-#  define MIN(X, Y) (((X)<(Y))?(X):(Y))
-#endif // MIN
-
 int Xtee::stdinQoS(const char* buf, int n)
 {
   if (n <=0)
@@ -260,7 +260,6 @@ int Xtee::stdinQoS(const char* buf, int n)
   return n;
 }
 
-// -----------------------------
 // closePipesToChild()
 // -----------------------------
 void Xtee::closePipesToChild(ChildStub &child)
@@ -287,7 +286,6 @@ void Xtee::closePipesToChild(ChildStub &child)
   // printLinks();
 }
 
-// -----------------------------
 // run()
 // -----------------------------
 int Xtee::run()
@@ -374,7 +372,7 @@ int Xtee::run()
     //   ::fcntl(child.stdio[j], F_SETFL, O_NONBLOCK);
 
     _children.push_back(child);
-    errlog(LOGF_TRACE, "created CH%02u pid(%d) [%d>%d,%d<%d,%d<%d]: %s", child.idx, child.pid,
+    errlog(LOGF_TRACE, "created CH%02u pid(%d) [%d>IN(%d),%d<OUT(%d),%d<ERR(%d)]: %s", child.idx, child.pid,
            CHILDIN(child), PSTDIN(stdioPipes)[0], CHILDOUT(child), PSTDOUT(stdioPipes)[1], CHILDERR(child), PSTDERR(stdioPipes)[1],
            child.cmd);
   }
@@ -528,7 +526,9 @@ int Xtee::run()
     FD_ZERO(&_fdsetRead);
     FD_ZERO(&_fdsetErr);
 
-    int maxfd = -1;
+    FD_SET(STDIN_FILENO, &_fdsetRead);
+    FD_SET(STDIN_FILENO, &_fdsetErr);
+    int maxfd = STDIN_FILENO;
     for (FDIndex::iterator it = _fd2fwd.begin(); it != _fd2fwd.end(); it++)
     {
       if (it->first < 0)
@@ -541,7 +541,7 @@ int Xtee::run()
     }
 
     // errlog(LOGF_TRACE, "loop maxfd[%d] %d/%d live child(s)", maxfd, cLiveChildren,_children.size());
-    if (maxfd <= 0) // || cLiveChildren > 0)
+    if (maxfd <= STDIN_FILENO) // || cLiveChildren > 0)
     {
       // no child seems alive, quit
       errlog(LOGF_TRACE, "stopping as no more alive child");
@@ -573,7 +573,15 @@ int Xtee::run()
 
     // pa step 5.5 about this stdin
     if (IS_VALID_FLAG_SET(STDIN_FILENO, _fdsetRead))
-        stdinQoS(buf, (int)::read(STDIN_FILENO, buf, sizeof(buf)));
+    {
+      int n= ::read(STDIN_FILENO, buf, sizeof(buf));
+      if (n < 0 ) // && _childsToStdin<=0) // EOF at stdin
+        _bQuit = true;
+      else stdinQoS(buf, n);
+    }
+
+    if (_childsToStdin<=0 && IS_VALID_FLAG_SET(STDIN_FILENO, _fdsetErr))
+      _bQuit = true;
 
     // pa step 5.6 scan if any child has IO occured
     for (size_t i = 0; !_bQuit && i < _children.size(); i++)
@@ -697,6 +705,7 @@ std::string Xtee::_unlink(int fdBy, Xtee::FDIndex& lookup, Xtee::FDIndex& revers
         ::fsync(fdLinked);
         ::close(fdLinked);
       }
+
       reverseLookup.erase(fdLinked);
       batch += fd2str(fdLinked) + ",";
     }
@@ -816,7 +825,7 @@ int Xtee::lineToArgv(char* argv[], int maxargc, char *line, int linelen)
 	}
 
 	int i=0;
-	for (i=0; i < maxargc-1 && i < tokens.size(); i++)
+	for (i=0; i < maxargc-1 && i < (int)tokens.size(); i++)
 	{
 		argv[i] = line + tokens[i].posStart;
 		line[tokens[i].posEnd] ='\0';
