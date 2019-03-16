@@ -16,7 +16,7 @@ extern "C"
 void usage()
 {
   std::cout << "Extended tee command" EOL
-            << "Copyright (C) syscheme@hotmail.com" EOL
+            << "Copyright (C) Andy Shao <syscheme@hotmail.com>" EOL
             << "License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>" EOL
             << "This is free software: you are free to change and redistribute it." EOL
             << "There is NO WARRANTY, to the extent permitted by law." EOL EOL
@@ -38,11 +38,10 @@ void usage()
             << "                       cmdNo=0 refers to the xtee command itself" EOL
             << "  -h                   display this screen" EOL EOL
             << "Examples:" EOL
-            << "  a) the following command results the same as runing \"ls -l | sort and ls -l | grep txt\"，but the" EOL
+            << "  a) the following command results the same as runing \"ls -l | sort\" and \"ls -l | grep txt\"，but the" EOL
             << "     outputs of the single round of \"ls -l\" will be taken by both \"sort\" and \"grep\" commands:" EOL
             << "       xtee -c \"ls -l\" -c sort -c \"grep txt\" -l 2:1.1 -l 3:1.1" EOL
-            << "  b) the following equal commands read and output at a limited speed of 500KBps" EOL
-            << "     as a file:" EOL
+            << "  b) the following command read and output at a limited speed of 500KBps:" EOL
             << "       xtee -c 'dd if=/dev/zero count=1000 bs=100K' -c 'dd of=/dev/null' -l 0:1.1 -l 2:0.1 -s 4000" EOL
             << "  c) the following equal commands download from a web at a limited speed of 3.75Mbps, zip and save" EOL
             << "     as a file:" EOL
