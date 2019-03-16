@@ -48,6 +48,8 @@ public:
 
   void printLinks();
 
+  int lineToArgv(char* argv[], int maxargc, char *line, int linelen);
+
   Options _options;
 
 protected:
