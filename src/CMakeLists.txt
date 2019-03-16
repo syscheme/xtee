@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.2)
 
-project(xtee)
+PROJECT(xtee)
 
 SET(CMAKE_BUILD_TYPE "Debug") 
 
@@ -8,7 +8,9 @@ SET(CMAKE_SOURCE_DIR .)
 SET(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wall -g -ggdb")
 SET(CMAKE_CXX_FLAGS_RELEASE "$ENV{CXXFLAGS} -O3 -Wall")
 
-ADD_EXECUTABLE(xtee xtee.cc)
+ADD_EXECUTABLE(xtee
+    xtee.cc main.cc
+)
 
 # ADD_SUBDIRECTORY(src)
 # AUX_SOURCE_DIRECTORY(.)

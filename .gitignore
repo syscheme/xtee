@@ -46,7 +46,7 @@ language.settings.xml
 *.lo
 *.location
 *.lock
-*.log
+*.errlog
 *.manifest
 *.markers
 *.mod
