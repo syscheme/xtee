@@ -416,7 +416,7 @@ int Xtee::run()
 
     if (childIdDest > (int)_children.size() || childIdSrc > (int)_children.size() || STDIN_FILENO != childFdDest || (childFdSrc != STDOUT_FILENO && childFdSrc != STDERR_FILENO))
     {
-      errlog(LOGF_ERROR, "skip invalid link CH%02d:%d <- CH%02d:%d", childIdDest, childFdDest, childIdSrc, childFdSrc);
+      errlog(LOGF_ERROR, "skip invalid link CH%02d:%d<-CH%02d:%d", childIdDest, childFdDest, childIdSrc, childFdSrc);
       continue;
     }
 
@@ -436,7 +436,7 @@ int Xtee::run()
       link(STDIN_FILENO, destPipe);
     else continue;
 
-    errlog(LOGF_TRACE, "linked (%d)CH%02d:%d <- (%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
+    errlog(LOGF_TRACE, "linked (%d)CH%02d:%d<-(%d)CH%02d:%d", destPipe, childIdDest, childFdDest, srcPipe, childIdSrc, childFdSrc);
   }
 
   // scan and fulfill the orphan pipes to the parent
@@ -448,19 +448,19 @@ int Xtee::run()
     if (_fd2src.end() == _fd2src.find(CHILDIN(child)))
     {
       link(STDIN_FILENO, CHILDIN(child));
-      errlog(LOGF_TRACE, "linked (%d)CH%02d:IN <- PA:IN", CHILDIN(child), i+1);
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:IN<-PA:IN", CHILDIN(child), i+1);
     }
 
     if (_fd2fwd.end() == _fd2fwd.find(CHILDOUT(child)))
     {
       link(CHILDOUT(child), STDOUT_FILENO);
-      errlog(LOGF_TRACE, "linked (%d)CH%02d:OUT -> PA:OUT", CHILDOUT(child), i+1);
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:OUT->PA:OUT", CHILDOUT(child), i+1);
     }
 
     if (_fd2fwd.end() == _fd2fwd.find(CHILDERR(child)))
     {
       link(CHILDERR(child), STDERR_FILENO);
-      errlog(LOGF_TRACE, "linked (%d)CH%02d:ERR -> PA:OUT", CHILDERR(child), i+1);
+      errlog(LOGF_TRACE, "linked (%d)CH%02d:ERR->PA:OUT", CHILDERR(child), i+1);
     }
   }
 
