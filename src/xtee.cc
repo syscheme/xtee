@@ -13,6 +13,8 @@ extern "C"
 #include <sys/time.h>
 }
 
+#define QoS_MEASURE_INTERVAL_MSEC (1000/QoS_MEASURES_PER_SEC) // msec
+
 #define PSTDIN(_PIO) (_PIO[0])
 #define PSTDOUT(_PIO) (_PIO[1])
 #define PSTDERR(_PIO) (_PIO[2])
@@ -61,7 +63,7 @@ static int64_t now()
 }
 
 Xtee::Xtee()
-    : _stampStart(0), _stampLast(0), _offsetOrigin(0), _offsetLast(0), _lastv(0), _kBpsLimit(0),
+    : _stampStart(0), _stampLast(0), _offsetOrigin(0), _offsetLast(0), _lastv(0), _kBpsLimit(0), _childsToStdin(0),
     _options({.noOutFile = false,
                 .append = false,
                 .kbps = -1,
@@ -98,7 +100,7 @@ int Xtee::pushLink(char *link)
   return _fdLinks.size();
 }
 
-static char buf[1024] = {0};
+static char buf[1024*4] = {0};
 // -----------------------------
 // checkAndForward()
 // -----------------------------
@@ -110,26 +112,45 @@ int Xtee::checkAndForward(int &fd, int defaultfd, int childIdx)
   if (IS_VALID_FLAG_SET(fd, _fdsetRead) && (n = ::read(fd, buf, sizeof(buf))) > 0)
   {
     FDIndex::iterator itIdx = _fd2fwd.find(fd);
-    if (_fd2fwd.end() == itIdx) // if (fwdset.empty())
-    {
-      if (defaultfd == STDERR_FILENO && childIdx > 0)
-      {
-        char cIdent[20];
-        snprintf(cIdent, sizeof(cIdent) - 2, "CH%02u> ", (unsigned)childIdx);
-        ::write(defaultfd, cIdent, strlen(cIdent));
-      }
+    // if (_fd2fwd.end() == itIdx) // if (fwdset.empty())
+    // {
+    //   if (defaultfd == STDERR_FILENO && childIdx > 0)
+    //   {
+    //     char cIdent[20];
+    //     snprintf(cIdent, sizeof(cIdent) - 2, "CH%02u> ", (unsigned)childIdx);
+    //     ::write(defaultfd, cIdent, strlen(cIdent));
+    //   }
 
-      ::write(defaultfd, buf, n);
+    //   ::write(defaultfd, buf, n);
 
-      if (defaultfd == STDERR_FILENO && childIdx > 0)
-        ::write(defaultfd, EOL, sizeof(EOL) - 1);
-    }
-    else
+    //   if (defaultfd == STDERR_FILENO && childIdx > 0)
+    //     ::write(defaultfd, EOL, sizeof(EOL) - 1);
+    // }
+    // else
+    // {
+    if (_fd2fwd.end() != itIdx)
     {
       FDSet& fwdset =itIdx->second;
       for (FDSet::const_iterator it = fwdset.begin(); it != fwdset.end(); it++)
       {
-        if (*it > 0)
+        if (*it < 0)
+          continue;
+
+        if (*it == STDIN_FILENO)
+        {
+          stdinQoS(buf, n);
+          continue;
+        }
+
+        if (*it == STDERR_FILENO && childIdx > 0)
+        {
+          errlog(LOGF_TRACE, "CH%02u> %s", (unsigned)childIdx, std::string(buf, n).c_str());
+          continue;
+          // char cIdent[20];
+          // snprintf(cIdent, sizeof(cIdent) - 2, "CH%02u> ", (unsigned)childIdx);
+          // ::write(defaultfd, cIdent, strlen(cIdent));
+        }
+
           ::write(*it, buf, n);
       }
     }
@@ -148,27 +169,28 @@ int Xtee::checkAndForward(int &fd, int defaultfd, int childIdx)
 // -----------------------------
 // stdinQoS()
 // -----------------------------
-int Xtee::stdinQoS()
-{
-  if (!IS_VALID_FLAG_SET(STDIN_FILENO, _fdsetRead))
-    return 0;
+#ifndef MIN
+#  define MIN(X, Y) (((X)<(Y))?(X):(Y))
+#endif // MIN
 
-  int n = ::read(STDIN_FILENO, buf, sizeof(buf));
-  if (n <= 0)
-    return n;
+int Xtee::stdinQoS(const char* buf, int n)
+{
+  if (n <=0)
+    return 0;
 
   int64_t stampNow = now();
 
   // yield if stamp start is defined and not meet
   if (_stampStart >0 && _stampStart > stampNow)
     return n;
+
   if (_stampStart<=0)
     _stampStart = stampNow;
 
   if (_options.secsDuration >0 && stampNow >(_stampStart + _options.secsDuration *1000))
     _bQuit = true;
 
-  char * p = buf;
+  const char * p = buf;
   
   // yield if the leading yield bytes is specified
   if (_options.bytesToSkip >0)
@@ -201,7 +223,7 @@ int Xtee::stdinQoS()
   }
 
   // limit the speed
-  if (_options.kbps > 0)
+  if (_kBpsLimit > 0)
   {
     stampNow = now();
     if (_stampLast <= 0)
@@ -211,22 +233,28 @@ int Xtee::stdinQoS()
     }
 
     int elapsed = stampNow - _stampLast;
-    int msecYield =0;
-    if(_kBpsLimit > 0 && elapsed > 300)
+    int bytesBypassed = _offsetOrigin - _offsetLast;
+    if (elapsed > QoS_MEASURE_INTERVAL_MSEC || bytesBypassed > (_kBpsLimit*QoS_MEASURES_PER_SEC))
     {
-      int msecP = (_offsetOrigin - _offsetLast) / _kBpsLimit - elapsed;
+      int msecP = bytesBypassed / _kBpsLimit - elapsed;
       int msecI = (_offsetOrigin - _options.bytesToSkip) / _kBpsLimit - (stampNow - _stampStart);
-      int v = (_offsetOrigin - _offsetLast) / elapsed;
+      int v = (elapsed >0) ? (bytesBypassed / elapsed) : (_lastv <<1);
       int msecV = (v > _lastv) ? 1 : -1;
+      msecI <<=2;
+      msecV *= (QoS_MEASURE_INTERVAL_MSEC /20);
 
-      msecYield = msecP + (msecI / 4) + msecV;
-      
+      int msecYield = MIN(msecP, msecI) + msecV;
+
       _lastv = v;
       _stampLast = stampNow;
-    }
 
-    if (msecYield > 0)
-      ::usleep(msecYield * 1000);
+      while (!_bQuit && msecYield > 0)
+      {
+        int msecSleep = MIN(500, msecYield); // up to 500msec per step to check _bQuit
+        msecYield -= msecSleep;
+        ::usleep(msecSleep * 1000);
+      }
+    }
   }
 
   return n;
@@ -237,36 +265,8 @@ int Xtee::stdinQoS()
 // -----------------------------
 void Xtee::closePipesToChild(ChildStub &child)
 {
-  // int nClosed = 0;
-  // for (int j = 0; j < 3; j++)
-  // {
-  //   int &fd = child.stdio[j];
-  //   if (fd > STDERR_FILENO)
-  //   {
-  //     ::fsync(fd);
-  //     ::close(fd);
-  //     fd = -1;
-  //     nClosed++;
-  //   }
-  // }
-
-  // for (FDSet::iterator it = child.fwdStdout.begin(); it != child.fwdStdout.end(); it++)
-  // {
-  //   if (*it > STDERR_FILENO)
-  //     ::close(*it);
-  // }
-
-  // child.fwdStdout.clear();
-
-  // for (FDSet::iterator it = child.fwdStderr.begin(); it != child.fwdStderr.end(); it++)
-  // {
-  //   if (*it > STDERR_FILENO)
-  //     ::close(*it);
-  // }
-
-  // child.fwdStderr.clear();
-
   std::string batch;
+  bool hasFeedToStdin = (_fd2src.end() != _fd2src.find(STDIN_FILENO));
 
   if (CHILDIN(child) > STDERR_FILENO)
     batch += closeDestFd(CHILDIN(child)) + ","; // STDIN of the chhild
@@ -277,8 +277,14 @@ void Xtee::closePipesToChild(ChildStub &child)
   if (CHILDERR(child) > STDERR_FILENO)
     batch += closeSrcFd(CHILDERR(child)); // STDERR of the chhild
 
+  if (_childsToStdin >0 && hasFeedToStdin && (_fd2src.end() == _fd2src.find(STDIN_FILENO))) // this is the last child who feeds xtee stdin
+  {
+    int tmp =STDIN_FILENO;
+    batch += std::string(",") +closeSrcFd(tmp);
+  }
+
   errlog(LOGF_TRACE, "closed link(s) of CH%02d[%s]: %s", child.idx, child.cmd, batch.c_str());
-  // return nClosed;
+  // printLinks();
 }
 
 // -----------------------------
@@ -423,6 +429,9 @@ int Xtee::run()
       // FDSet &fwdset = (childFdSrc == STDOUT_FILENO) ? child.fwdStdout : child.fwdStderr;
       // fwdset.insert(destPipe);
       link((childFdSrc == STDOUT_FILENO)?CHILDOUT(child):CHILDERR(child), destPipe);
+
+      if (STDIN_FILENO == destPipe)
+        _childsToStdin++; // child ever asked to output to parenet's stdin
     }
     else if (childFdSrc == STDOUT_FILENO)
       // _stdin2fwd.insert(destPipe);
@@ -438,11 +447,13 @@ int Xtee::run()
     ChildStub &child = _children[i];
 
     // link the undefined pipes to the parent
-    if (_fd2src.end() == _fd2src.find(CHILDIN(child)))
-    {
-      link(STDIN_FILENO, CHILDIN(child));
-      errlog(LOGF_TRACE, "linked orphan %d:CH%02d.IN<-PA.IN", CHILDIN(child), i+1);
-    }
+
+    // Note: NO default STDIN if not specified in command line:
+    //  if (_fd2src.end() == _fd2src.find(CHILDIN(child)))
+    // {
+    //   link(STDIN_FILENO, CHILDIN(child));
+    //   errlog(LOGF_TRACE, "linked orphan %d:CH%02d.IN<-PA.IN", CHILDIN(child), i+1);
+    // }
 
     if (_fd2fwd.end() == _fd2fwd.find(CHILDOUT(child)))
     {
@@ -473,8 +484,10 @@ int Xtee::run()
   //   }
   // }
 
+  printLinks();
+
   // pa step 5. start the main loop
-  int maxTimeouts = _options.secsTimeout * 1000 / CHECK_INTERVAL;
+  int maxTimeouts = _options.secsTimeout * QoS_MEASURES_PER_SEC;
   bool bChildCheckNeeded = false;
   int nIdles = 0;
   int cLiveChildren =0;
@@ -482,7 +495,7 @@ int Xtee::run()
   for (int timeouts = 0; !_bQuit && (maxTimeouts < 0 || timeouts < maxTimeouts);)
   {
     // pa step 5.1 check the child processes
-    if (bChildCheckNeeded || nIdles > (10000 / CHECK_INTERVAL))
+    if (bChildCheckNeeded || nIdles > (QoS_MEASURES_PER_SEC *10)) // up to 10sec interval to check child process
     {
       cLiveChildren =0;
       nIdles = 0;
@@ -501,9 +514,9 @@ int Xtee::run()
 
         closePipesToChild(child);
         if (wpid == child.pid)
-          errlog(LOGF_TRACE, "detected CH%02u[%s] pid(%d) exited: status(0x%x)", child.idx, child.cmd, child.pid, child.status);
+          errlog(LOGF_TRACE, "detected CH%02u pid(%d) exited w/ status(0x%x): %s", child.idx, child.pid, child.status, child.cmd);
         else
-          errlog(LOGF_TRACE, "detected CH%02u[%s] pid(%d) gone", child.idx, child.cmd, child.pid);
+          errlog(LOGF_TRACE, "detected CH%02u pid(%d) gone: %s", child.idx, child.pid, child.cmd);
 
         child.pid = -1;
       }
@@ -538,8 +551,8 @@ int Xtee::run()
 
     // pa step 5.3 do select()
     struct timeval timeout;
-    timeout.tv_sec = CHECK_INTERVAL / 1000;
-    timeout.tv_usec = (CHECK_INTERVAL % 1000) * 1000;
+    timeout.tv_sec = QoS_MEASURE_INTERVAL_MSEC / 1000;
+    timeout.tv_usec = (QoS_MEASURE_INTERVAL_MSEC % 1000) * 1000;
 
     int rc = select(maxfd + 1, &_fdsetRead, NULL, &_fdsetErr, &timeout);
     if (_bQuit)
@@ -559,15 +572,8 @@ int Xtee::run()
     }
 
     // pa step 5.5 about this stdin
-    // stdinQoS();
-    // {
-    //   checkAndForward(STDIN_FILENO, STDOUT_FILENO);
-
-    //   if(cLiveChildren<=0)
-    //     break;
-
-    //   QoS((uint)n);
-    // }
+    if (IS_VALID_FLAG_SET(STDIN_FILENO, _fdsetRead))
+        stdinQoS(buf, (int)::read(STDIN_FILENO, buf, sizeof(buf)));
 
     // pa step 5.6 scan if any child has IO occured
     for (size_t i = 0; !_bQuit && i < _children.size(); i++)
@@ -652,7 +658,6 @@ static std::string fd2str(int fd)
 void Xtee::printLinks()
 {
   std::string result;
-  result.reserve(200);
   for (FDIndex::iterator it = _fd2fwd.begin(); it != _fd2fwd.end(); it++)
   {
     std::string to;
@@ -665,7 +670,7 @@ void Xtee::printLinks()
     result += fd2str(it->first) + "->[" +to +"];";
   }
 
-  errlog(LOGF_TRACE, "links: ", result.c_str());
+  errlog(LOGF_TRACE, "links: %s", result.c_str());
 }
 
 std::string Xtee::_unlink(int fdBy, Xtee::FDIndex& lookup, Xtee::FDIndex& reverseLookup)
@@ -687,8 +692,11 @@ std::string Xtee::_unlink(int fdBy, Xtee::FDIndex& lookup, Xtee::FDIndex& revers
     if (itReversed->second.empty())
     {
       // the fdLinked has no more links left, close it and clean
-      ::fsync(fdLinked);
-      ::close(fdLinked);
+      if (fdLinked > STDERR_FILENO)
+      {
+        ::fsync(fdLinked);
+        ::close(fdLinked);
+      }
       reverseLookup.erase(fdLinked);
       batch += fd2str(fdLinked) + ",";
     }

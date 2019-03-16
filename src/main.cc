@@ -4,6 +4,7 @@ extern "C"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <signal.h>
 }
 
 // -----------------------------
@@ -17,7 +18,7 @@ void usage()
             << "  -v <level>           verbose level, default 4 to output progress onto stderr" EOL
             << "  -a                   append to the output file" EOL
             << "  -n                   no output file other than stdout" EOL
-            << "  -s <kbps>            limits the transfer bitrate at reading from stdin in kbps" EOL
+            << "  -s <kbps>            limits the transfer bitrate at reading from stdin in kbps, minimal 8kbps" EOL
             << "  -k <bytes>           skips a certain amount of bytes at the beginning of reading from stdin" EOL
             << "  -t <secs>            skips the given seconds of data at reading from stdin" EOL
             << "  -d <secs>            duration in seconds to run" EOL
@@ -39,6 +40,9 @@ void usage()
             << EOL;
 }
 
+Xtee xtee;
+void OnSingal(int sig);
+
 // -----------------------------
 // main()
 // -----------------------------
@@ -51,7 +55,8 @@ int main(int argc, char *argv[])
     return -1;
   }
 
-  Xtee xtee;
+  // register signal handler 
+  ::signal(SIGINT, OnSingal); 
 
   int opt = 0;
   while (-1 != (opt = getopt(argc, argv, "hnas:k:t:d:q:c:l:")))
@@ -104,4 +109,16 @@ int main(int argc, char *argv[])
   }
 
   return xtee.init() ? xtee.run() :-100;
+}
+
+void OnSingal(int sig)
+{
+  switch (sig)
+  {
+  case SIGINT:
+  default:
+    xtee.errlog(LOGF_ERROR, "stop per SIG(%d)", sig);
+    xtee.stop();
+    break;
+  }
 }

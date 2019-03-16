@@ -14,7 +14,7 @@ extern "C"
 }
 
 #define EOL "\r\n"
-#define CHECK_INTERVAL (500) // 500msec
+#define QoS_MEASURES_PER_SEC      (10)  // 10 times per second
 
 #define LOGF_TRACE (1 << 0)
 #define LOGF_ERROR (1 << 1)
@@ -42,10 +42,12 @@ public:
 
   bool init();
   int run();
+  void stop() { _bQuit =true; }
 
   int pushCommand(char* cmd);
   int pushLink(char* link);
 
+  int  errlog(unsigned short category, const char *fmt, ...);
   void printLinks();
 
   int lineToArgv(char* argv[], int maxargc, char *line, int linelen);
@@ -79,12 +81,11 @@ protected:
   void    unlink(int fdIn, int fdTo);
   std::string closeSrcFd(int& fdSrc);
   std::string closeDestFd(int& fdDest);
-  int     errlog(unsigned short category, const char *fmt, ...);
   
   //@return bytes read from the fd, -1 if error occured at reading
   int     checkAndForward(int &fd, int defaultfd, int childIdx = -1);
   void    closePipesToChild(ChildStub &child);
-  int     stdinQoS();
+  int     stdinQoS(const char* buf, int len);
 
   bool _bQuit = false;
   typedef std::vector<char *> Strings;
@@ -98,6 +99,7 @@ private:
   int64_t _offsetOrigin, _offsetLast;
   int64_t _stampStart, _stampLast;
   int _kBpsLimit, _lastv;
+  int _childsToStdin;
 };
 
 #endif // __XTEE_HH__
